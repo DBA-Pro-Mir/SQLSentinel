@@ -4,7 +4,7 @@
   "CentralDatabase": "SQLMonitoring",
   "DefaultConnectionTimeoutSeconds": 5,
   "DefaultQueryTimeoutSeconds": 15,
-  "CollectorLogPath": "C:\\SQLSentinel\\Logs",
+  "CollectorLogPath": "D:\\SQLSentinel\\Logs",
   "Collectors": {
     "PerformanceCounters": {
       "IsEnabled": true,
