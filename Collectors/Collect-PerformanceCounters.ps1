@@ -1,16 +1,6 @@
 <#
 ===============================================================================
  SQLSentinel - Performance Counter Collector
-
- Purpose:
-   Collect lightweight SQL Server performance counters from monitored instances
-   and insert them into SQLMonitoring.dbo.MetricSnapshot.
-
- Requirements:
-   - dbatools module
-   - SQLSentinel.config.json
-   - SQLMonitoring repository database
-   - dbo.MonitoredInstances populated
 ===============================================================================
 #>
 
@@ -45,6 +35,7 @@ function Start-CollectionRun {
     param(
         [string]$CentralSqlInstance,
         [string]$CentralDatabase,
+        [pscredential]$SqlCredential,
         [int]$InstanceId,
         [string]$CollectorName
     )
@@ -67,8 +58,9 @@ VALUES
 );
 "@
 
-    return Invoke-DbaQuery `
+    Invoke-DbaQuery `
         -SqlInstance $CentralSqlInstance `
+        -SqlCredential $SqlCredential `
         -Database $CentralDatabase `
         -Query $query `
         -As SingleValue
@@ -78,6 +70,7 @@ function Complete-CollectionRun {
     param(
         [string]$CentralSqlInstance,
         [string]$CentralDatabase,
+        [pscredential]$SqlCredential,
         [bigint]$CollectionRunId,
         [string]$Status,
         [int]$RowsCollected,
@@ -104,6 +97,7 @@ WHERE CollectionRunId = $CollectionRunId;
 
     Invoke-DbaQuery `
         -SqlInstance $CentralSqlInstance `
+        -SqlCredential $SqlCredential `
         -Database $CentralDatabase `
         -Query $query | Out-Null
 }
@@ -125,6 +119,15 @@ try {
     $CentralDatabase = $config.CentralDatabase
     $QueryTimeout = $config.Collectors.PerformanceCounters.QueryTimeoutSeconds
 
+    $SqlCredential = $null
+
+    if ($config.SqlCredential.Username -and $config.SqlCredential.Password) {
+        $SqlCredential = New-Object System.Management.Automation.PSCredential(
+            $config.SqlCredential.Username,
+            (ConvertTo-SecureString $config.SqlCredential.Password -AsPlainText -Force)
+        )
+    }
+
     Write-Info "Starting $CollectorName"
     Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
 
@@ -139,6 +142,7 @@ ORDER BY InstanceName;
 
     $instances = Invoke-DbaQuery `
         -SqlInstance $CentralSqlInstance `
+        -SqlCredential $SqlCredential `
         -Database $CentralDatabase `
         -Query $instancesQuery `
         -QueryTimeout 30
@@ -156,6 +160,7 @@ ORDER BY InstanceName;
             $CollectionRunId = Start-CollectionRun `
                 -CentralSqlInstance $CentralSqlInstance `
                 -CentralDatabase $CentralDatabase `
+                -SqlCredential $SqlCredential `
                 -InstanceId $InstanceId `
                 -CollectorName $CollectorName
 
@@ -192,6 +197,7 @@ WHERE counter_name IN
 
             $counters = Invoke-DbaQuery `
                 -SqlInstance $TargetInstance `
+                -SqlCredential $SqlCredential `
                 -Database master `
                 -Query $counterQuery `
                 -QueryTimeout $QueryTimeout
@@ -200,6 +206,7 @@ WHERE counter_name IN
 
                 $ObjectName = $counter.ObjectName.Replace("'", "''")
                 $CounterName = $counter.CounterName.Replace("'", "''")
+
                 $CounterInstanceName = if ([string]::IsNullOrWhiteSpace($counter.InstanceName)) {
                     "NULL"
                 }
@@ -224,6 +231,8 @@ WHERE counter_name IN
                     default { "count" }
                 }
 
+                $CaptureTime = ([datetime]$counter.CaptureTime).ToString("yyyy-MM-dd HH:mm:ss")
+
                 $insertQuery = @"
 INSERT INTO dbo.MetricSnapshot
 (
@@ -242,7 +251,7 @@ INSERT INTO dbo.MetricSnapshot
 VALUES
 (
     $InstanceId,
-    '$($counter.CaptureTime.ToString("yyyy-MM-dd HH:mm:ss"))',
+    '$CaptureTime',
     NULL,
     N'$ObjectName',
     N'$CounterName',
@@ -257,6 +266,7 @@ VALUES
 
                 Invoke-DbaQuery `
                     -SqlInstance $CentralSqlInstance `
+                    -SqlCredential $SqlCredential `
                     -Database $CentralDatabase `
                     -Query $insertQuery `
                     -QueryTimeout 30 | Out-Null
@@ -267,6 +277,7 @@ VALUES
             Complete-CollectionRun `
                 -CentralSqlInstance $CentralSqlInstance `
                 -CentralDatabase $CentralDatabase `
+                -SqlCredential $SqlCredential `
                 -CollectionRunId $CollectionRunId `
                 -Status "Success" `
                 -RowsCollected $RowsCollected
@@ -281,6 +292,7 @@ VALUES
                 Complete-CollectionRun `
                     -CentralSqlInstance $CentralSqlInstance `
                     -CentralDatabase $CentralDatabase `
+                    -SqlCredential $SqlCredential `
                     -CollectionRunId $CollectionRunId `
                     -Status "Failed" `
                     -RowsCollected $RowsCollected `
