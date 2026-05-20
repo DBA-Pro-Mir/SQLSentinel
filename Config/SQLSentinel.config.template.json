@@ -1,0 +1,22 @@
+{
+  "ProjectName": "SQLSentinel",
+  "CentralSqlInstance": "localhost",
+  "CentralDatabase": "SQLMonitoring",
+
+  "SqlCredential": {
+    "Username": "",
+    "Password": ""
+  },
+
+  "DefaultConnectionTimeoutSeconds": 5,
+  "DefaultQueryTimeoutSeconds": 15,
+  "CollectorLogPath": "D:\\SQLSentinel\\Logs",
+
+  "Collectors": {
+    "PerformanceCounters": {
+      "IsEnabled": true,
+      "IntervalSeconds": 60,
+      "QueryTimeoutSeconds": 15
+    }
+  }
+}
