@@ -17,6 +17,9 @@
 # Mono auto generated files
 mono_crash.*
 
+# Local runtime configuration
+Config/SQLSentinel.config.json
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
