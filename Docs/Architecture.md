@@ -89,6 +89,22 @@ The collector layer is responsible for:
 - Inserting results into `dbo.MetricSnapshot` or `dbo.MetricTextSnapshot`
 - Logging execution results in `dbo.CollectionRunHistory`
 
+Current collectors:
+
+| Collector | Purpose | Frequency | Storage |
+| :--- | :--- | :--- | :--- |
+| Collect-PerformanceCounters.ps1 | SQL Server performance counters | 1 minute | dbo.MetricSnapshot |
+| Collect-Connections.ps1 | Connection/session telemetry | 1 minute | dbo.MetricSnapshot |
+
+Collectors insert telemetry into the generic metric model using these fields:
+
+- MetricCategory
+- ObjectName
+- CounterName
+- InstanceName
+- MetricValue
+- SourceCollector
+
 ---
 
 # Data Flow

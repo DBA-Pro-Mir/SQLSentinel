@@ -138,6 +138,19 @@ This allows new collectors to be added without creating a new table for every me
 
 ---
 
+# Connection Telemetry Cardinality Control
+
+Connection telemetry is aggregated and filtered to avoid excessive row generation.
+
+Protections include:
+
+- TOP row limits for breakdown metrics
+- Minimum session count thresholds
+- Aggregated snapshots instead of storing every session row
+- Breakdown metrics limited to login, host, application, and database
+
+---
+
 # Database Attribution
 
 A major goal is to identify the database most likely related to slowness or anomalies.

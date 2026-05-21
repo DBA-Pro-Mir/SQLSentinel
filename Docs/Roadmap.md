@@ -56,6 +56,12 @@ Collect the first low-overhead metrics from monitored SQL Servers.
 | Database IO | 5 minutes | MetricSnapshot |
 | Active expensive requests | 1 minute | MetricTextSnapshot |
 
+## Current Status
+
+- ✅ Performance counter collector completed
+- ✅ Connection collector completed
+- ▶️ Blocking collector next
+
 ## Success Criteria
 
 - Metrics are collected from at least one remote SQL Server.
