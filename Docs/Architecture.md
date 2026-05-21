@@ -253,7 +253,108 @@ The first collector phase should include:
 | Active Expensive Requests | 1 minute | MetricTextSnapshot |
 
 ---
+---
 
+# Authentication Model
+
+SQLSentinel collectors currently support SQL Authentication using credentials defined in the local runtime configuration file.
+
+The collector reads:
+
+```plaintext
+Config/SQLSentinel.config.json
+```
+
+and creates a PowerShell credential object from:
+
+```json
+"SqlCredential": {
+  "Username": "sqlsentinel",
+  "Password": "REPLACE_WITH_LOCAL_PASSWORD"
+}
+```
+
+This credential is passed to dbatools using:
+
+```powershell
+-SqlCredential $SqlCredential
+```
+
+The credential is used for:
+
+- Connecting to the central repository database
+- Reading enabled monitored instances
+- Connecting to each monitored SQL Server
+- Writing collected metrics to the repository
+
+The real config file is local-only and must not be committed to GitHub.
+
+---
+
+# Multi-Server Collection Model
+
+Collectors dynamically read enabled SQL instances from:
+
+```plaintext
+dbo.MonitoredInstances
+```
+
+This allows SQLSentinel to scale horizontally without modifying collector code.
+
+Example flow:
+
+```plaintext
+Collector Start
+    |
+    |-- Read enabled monitored instances
+    |
+    |-- Loop through each SQL Server
+            |
+            |-- Connect
+            |-- Collect metrics
+            |-- Insert into repository
+            |-- Log success/failure
+```
+
+Collectors continue processing remaining servers even if one monitored server fails.
+
+---
+
+# Current Working Prototype Components
+
+Currently operational:
+
+| Component | Status |
+| :--- | :--- |
+| Central repository database | Working |
+| Generic metric storage | Working |
+| Multi-server collection | Working |
+| Performance counter collector | Working |
+| SQL authentication support | Working |
+| Collection execution logging | Working |
+| GitHub repository structure | Working |
+
+Current collector:
+
+```plaintext
+Collectors/Collect-PerformanceCounters.ps1
+```
+
+Current metrics collected:
+
+- Batch Requests/sec
+- User Connections
+- Logins/sec
+- Logouts/sec
+- Transactions/sec
+- Lock Waits/sec
+- Deadlocks/sec
+- SQL Compilations/sec
+- SQL Re-Compilations/sec
+- Memory metrics
+- Buffer metrics
+- Page life expectancy
+  
 # Future Architecture Enhancements
 
 Planned enhancements:
