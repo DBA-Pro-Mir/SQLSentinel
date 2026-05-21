@@ -130,14 +130,14 @@ try {
     if ($null -ne $config.Collectors -and $null -ne $config.Collectors.ActiveRequests) {
         $activeRequestConfig = $config.Collectors.ActiveRequests
 
-        if ($null -ne $activeRequestConfig.QueryTimeoutSeconds) { $QueryTimeout = [int]$activeRequestConfig.QueryTimeoutSeconds }
-        if ($null -ne $activeRequestConfig.MinElapsedTimeMs) { $MinElapsedTimeMs = [int]$activeRequestConfig.MinElapsedTimeMs }
-        if ($null -ne $activeRequestConfig.MinCpuTimeMs) { $MinCpuTimeMs = [int]$activeRequestConfig.MinCpuTimeMs }
-        if ($null -ne $activeRequestConfig.MinLogicalReads) { $MinLogicalReads = [int]$activeRequestConfig.MinLogicalReads }
-        if ($null -ne $activeRequestConfig.MinPhysicalReads) { $MinPhysicalReads = [int]$activeRequestConfig.MinPhysicalReads }
-        if ($null -ne $activeRequestConfig.MinWrites) { $MinWrites = [int]$activeRequestConfig.MinWrites }
-        if ($null -ne $activeRequestConfig.MinWaitTimeMs) { $MinWaitTimeMs = [int]$activeRequestConfig.MinWaitTimeMs }
-        if ($null -ne $activeRequestConfig.MaximumRequests) { $MaximumRequests = [int]$activeRequestConfig.MaximumRequests }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "QueryTimeoutSeconds") { $QueryTimeout = [int]$activeRequestConfig.QueryTimeoutSeconds }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MinElapsedTimeMs") { $MinElapsedTimeMs = [int]$activeRequestConfig.MinElapsedTimeMs }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MinCpuTimeMs") { $MinCpuTimeMs = [int]$activeRequestConfig.MinCpuTimeMs }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MinLogicalReads") { $MinLogicalReads = [int]$activeRequestConfig.MinLogicalReads }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MinPhysicalReads") { $MinPhysicalReads = [int]$activeRequestConfig.MinPhysicalReads }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MinWrites") { $MinWrites = [int]$activeRequestConfig.MinWrites }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MinWaitTimeMs") { $MinWaitTimeMs = [int]$activeRequestConfig.MinWaitTimeMs }
+        if ($activeRequestConfig.PSObject.Properties.Name -contains "MaximumRequests") { $MaximumRequests = [int]$activeRequestConfig.MaximumRequests }
     }
 
     $SqlCredential = $null
@@ -203,12 +203,16 @@ WITH ActiveRequests AS
         logical_reads = ISNULL(r.logical_reads, 0),
         reads = ISNULL(r.reads, 0),
         writes = ISNULL(r.writes, 0),
-        SqlText = CAST(st.text AS nvarchar(max))
+        percent_complete = ISNULL(r.percent_complete, 0),
+        SqlText = LEFT(CAST(st.text AS nvarchar(max)), 4000)
     FROM sys.dm_exec_requests AS r
     INNER JOIN sys.dm_exec_sessions AS s
         ON r.session_id = s.session_id
     OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS st
     WHERE s.is_user_process = 1
+      AND ISNULL(s.program_name, '') NOT LIKE '%dbatools%'
+      AND ISNULL(s.program_name, '') NOT LIKE '%PowerShell%'
+      AND ISNULL(s.login_name, '') <> 'sqlsentinel'
 )
 SELECT
     SYSDATETIME() AS CaptureTime,
@@ -244,6 +248,7 @@ SELECT TOP ($MaximumRequests)
     logical_reads,
     reads,
     writes,
+    percent_complete,
     SqlText
 FROM ActiveRequests
 WHERE
@@ -362,6 +367,7 @@ ElapsedTimeMs: $($detail.total_elapsed_time)
 LogicalReads: $($detail.logical_reads)
 Reads: $($detail.reads)
 Writes: $($detail.writes)
+PercentComplete: $($detail.percent_complete)
 SQL text: $safeSqlText
 "@
 
@@ -410,14 +416,14 @@ VALUES
                 -CentralDatabase $CentralDatabase `
                 -SqlCredential $SqlCredential `
                 -CollectionRunId $CollectionRunId `
-                -Status "Succeeded" `
+                -Status "Success" `
                 -RowsCollected $RowsCollected
 
             Write-Info "Completed $TargetInstance ($RowsCollected rows)"
         }
         catch {
             $err = $_.Exception.Message
-            Write-Fail "Failed for $TargetInstance: $err"
+            Write-Fail "Failed for ${TargetInstance}: $err"
 
             if ($CollectionRunId) {
                 Complete-CollectionRun `
