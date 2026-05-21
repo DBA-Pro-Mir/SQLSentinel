@@ -36,10 +36,11 @@ Current working prototype features:
 - SQL authentication support
 - dbatools-based connectivity
 
-Current working collector:
+Current working collectors:
 
 ```plaintext
 Collectors/Collect-PerformanceCounters.ps1
+Collectors/Collect-Connections.ps1
 ```
 
 Currently monitored metrics include:
@@ -56,6 +57,16 @@ Currently monitored metrics include:
 - Memory metrics
 - Buffer metrics
 - Page life expectancy
+- TotalUserSessions
+- DistinctLogins
+- DistinctHosts
+- DistinctApplications
+- Sessions by login
+- Sessions by host
+- Sessions by application
+- Sessions by database
+
+Connection breakdown metrics use TOP row limits and minimum session thresholds to reduce excessive metric cardinality.
 
 ---
 
