@@ -223,6 +223,27 @@ CPU pressure was above normal for 12 minutes, batch requests dropped 40%, signal
 
 ---
 
+
+# Active Request Collection Philosophy
+
+SQLSentinel does not collect every running query.
+
+`Collect-ActiveRequests.ps1` captures only requests that cross defined thresholds, such as:
+
+- Long elapsed time
+- High CPU
+- High logical reads
+- High physical reads
+- High writes
+- Long waits
+- Blocking
+
+Summary metrics are always stored in `dbo.MetricSnapshot`.
+
+Detailed request evidence is stored in `dbo.MetricTextSnapshot` only when thresholds are exceeded.
+
+This keeps the collector lightweight while preserving evidence for performance investigations.
+
 # Long-Term Direction
 
 SQLSentinel should evolve toward:

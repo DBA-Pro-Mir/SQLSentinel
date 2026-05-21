@@ -355,6 +355,13 @@ Current collector:
 ```plaintext
 Collectors/Collect-PerformanceCounters.ps1
 ```
+# Current Working Collectors
+
+| Collector | Purpose | Storage |
+| :--- | :--- | :--- |
+| Collect-PerformanceCounters.ps1 | SQL Server performance counters and throughput metrics | dbo.MetricSnapshot |
+| Collect-Connections.ps1 | Connection/session summary and breakdown metrics | dbo.MetricSnapshot |
+| Collect-ActiveRequests.ps1 | Threshold-based capture of expensive currently running requests | dbo.MetricSnapshot, dbo.MetricTextSnapshot |
 
 Current metrics collected:
 

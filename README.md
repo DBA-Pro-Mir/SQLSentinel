@@ -82,3 +82,12 @@ Validated prototype environment:
 | SQL Authentication | Working |
 | dbatools connectivity | Working |
 | Historical metric ingestion | Working |
+
+
+# Current Working Collectors
+
+| Collector | Purpose | Storage |
+| :--- | :--- | :--- |
+| Collect-PerformanceCounters.ps1 | SQL Server performance counters and throughput metrics | dbo.MetricSnapshot |
+| Collect-Connections.ps1 | Connection/session summary and breakdown metrics | dbo.MetricSnapshot |
+| Collect-ActiveRequests.ps1 | Threshold-based capture of expensive currently running requests | dbo.MetricSnapshot, dbo.MetricTextSnapshot |
