@@ -275,3 +275,145 @@ Design decisions, deployment steps, and operational notes should be versioned wi
 - Clear history of decisions
 - Easier onboarding
 - Reduced dependency on chat history
+
+---
+
+# Decision 13 — Do Not Store Secrets in GitHub
+
+## Decision
+
+Runtime configuration containing credentials must not be committed to GitHub.
+
+## Implementation
+
+Commit only:
+
+```plaintext
+Config/SQLSentinel.config.template.json
+```
+
+Do not commit:
+
+```plaintext
+Config/SQLSentinel.config.json
+```
+
+The local config file is excluded using `.gitignore`.
+
+## Reason
+
+The runtime config may contain:
+
+- SQL login names
+- Passwords
+- Environment-specific server names
+- Local paths
+- Production-specific values
+
+## Benefit
+
+This protects secrets while still documenting the required configuration structure.
+
+---
+
+# Decision 14 — Support SQL Authentication for Prototype Testing
+
+## Decision
+
+Collectors support SQL Authentication through `SqlCredential` in the local runtime config.
+
+## Reason
+
+During prototype testing, Windows Integrated Authentication may fail when:
+
+- Servers are in untrusted domains
+- Testing from a desktop
+- Workgroup/local accounts are involved
+- The jump server is not yet fully configured
+
+## Long-Term Direction
+
+For production, prefer:
+
+- Domain service account
+- Windows Integrated Authentication
+- Trusted SQL certificates
+- Secure credential store
+
+Potential future options:
+
+- Windows Credential Manager
+- Microsoft.PowerShell.SecretManagement
+- Azure Key Vault
+
+---
+
+# Decision 15 — Use dbatools as the SQL Connectivity Layer
+
+## Decision
+
+SQLSentinel uses dbatools for SQL connectivity and query execution.
+
+## Primary Commands Used
+
+- Invoke-DbaQuery
+- Test-DbaConnection
+
+## Reason
+
+dbatools simplifies:
+
+- Multi-instance execution
+- SQL authentication
+- Connection handling
+- Timeout management
+- Error handling
+- Future automation tasks
+
+## Benefits
+
+- Faster development
+- Consistent connectivity model
+- Better PowerShell integration
+- Easier multi-server scaling
+- Mature SQL DBA tooling ecosystem
+
+---
+
+# Decision 16 — Collectors Must Continue on Failure
+
+## Decision
+
+A collector failure against one SQL instance must not stop collection against other monitored servers.
+
+## Reason
+
+Monitoring systems must tolerate partial outages.
+
+Example:
+
+```plaintext
+One monitored SQL Server is offline.
+The remaining monitored servers should still be collected successfully.
+```
+
+## Implementation
+
+Collectors use:
+
+```plaintext
+Per-instance TRY/CATCH logic
+```
+
+and log failures into:
+
+```plaintext
+dbo.CollectionRunHistory
+```
+
+## Benefit
+
+- Better resiliency
+- Reduced monitoring gaps
+- Easier troubleshooting
+- Partial collection continuity
