@@ -182,7 +182,7 @@ WITH ActiveSessions AS
     FROM sys.dm_exec_sessions
     WHERE is_user_process = 1
 )
-SELECT TOP ($MaximumBreakdownRows)
+SELECT
     SYSDATETIME() AS CaptureTime,
     TotalUserSessions = COUNT_BIG(1),
     DistinctLogins = COUNT(DISTINCT NULLIF(login_name, '')),
