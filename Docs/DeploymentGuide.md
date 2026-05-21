@@ -201,7 +201,139 @@ DOMAIN\svc_sqlsentinel
 - Git repository is cloned locally
 
 ---
+# Runtime Configuration and Credentials
 
+SQLSentinel uses two configuration files:
+
+| File | Purpose | Commit to GitHub |
+| :--- | :--- | :--- |
+| Config/SQLSentinel.config.template.json | Safe template showing required configuration structure | Yes |
+| Config/SQLSentinel.config.json | Local runtime configuration with environment-specific values and credentials | No |
+
+The real runtime configuration file should be excluded from Git using `.gitignore`.
+
+Add this to `.gitignore`:
+
+```gitignore
+Config/SQLSentinel.config.json
+```
+
+---
+
+# SQL Authentication for Prototype Testing
+
+During prototype testing, SQL Authentication can be used when Windows Integrated Authentication is not available or when testing across untrusted domains.
+
+Example local runtime config:
+
+```json
+{
+  "ProjectName": "SQLSentinel",
+  "CentralSqlInstance": "localhost",
+  "CentralDatabase": "SQLMonitoring",
+
+  "SqlCredential": {
+    "Username": "sqlsentinel",
+    "Password": "REPLACE_WITH_LOCAL_PASSWORD"
+  },
+
+  "DefaultConnectionTimeoutSeconds": 5,
+  "DefaultQueryTimeoutSeconds": 15,
+  "CollectorLogPath": "D:\\SQLSentinel\\Logs"
+}
+```
+
+Do not commit the real password to GitHub.
+
+---
+
+# Required SQL Login on Monitored Servers
+
+For each monitored SQL Server, create or verify the SQL login used by the collectors.
+
+```sql
+USE master;
+GO
+
+CREATE LOGIN sqlsentinel
+WITH PASSWORD = 'REPLACE_WITH_STRONG_PASSWORD';
+GO
+
+GRANT VIEW SERVER STATE TO sqlsentinel;
+GO
+```
+
+If the login already exists:
+
+```sql
+USE master;
+GO
+
+GRANT VIEW SERVER STATE TO sqlsentinel;
+GO
+```
+
+`VIEW SERVER STATE` is required for DMV-based collectors such as:
+
+- Performance counters
+- Wait stats
+- Active requests
+- Blocking
+- Database IO
+
+---
+
+# Adding a Monitored Server
+
+Add the SQL Server to the central repository:
+
+```sql
+USE SQLMonitoring;
+GO
+
+INSERT INTO dbo.MonitoredInstances
+(
+    InstanceName,
+    EnvironmentName,
+    CollectionProfile,
+    Notes
+)
+VALUES
+(
+    'EC-DEV-WSD-01',
+    'Dev',
+    'Standard',
+    'Development SQL Server'
+);
+GO
+```
+
+Validate:
+
+```sql
+SELECT *
+FROM dbo.MonitoredInstances
+ORDER BY InstanceName;
+```
+
+---
+
+# Testing Multi-Server Collection
+
+Run:
+
+```powershell
+.\Collectors\Collect-PerformanceCounters.ps1
+```
+
+Expected output:
+
+```plaintext
+[INFO] Collecting performance counters from EC-DEV-WSD-01
+[INFO] Completed EC-DEV-WSD-01. Rows collected: 62
+[INFO] Collecting performance counters from INF-PRD-PVT-01
+[INFO] Completed INF-PRD-PVT-01. Rows collected: 53
+```
 # Next Step
 
 After deployment, create the configuration file:
