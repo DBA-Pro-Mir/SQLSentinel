@@ -171,7 +171,12 @@ ORDER BY InstanceName;
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
-            $collectQuery = @"
+            $collectAndInsertQuery = @"
+IF OBJECT_ID('tempdb..#FileIoMetrics') IS NOT NULL
+BEGIN
+    DROP TABLE #FileIoMetrics;
+END;
+
 SELECT
     DatabaseName = DB_NAME(vfs.database_id),
     LogicalFileName = mf.name,
@@ -206,6 +211,7 @@ SELECT
         END
         AS decimal(19,2)
     )
+INTO #FileIoMetrics
 FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
 INNER JOIN sys.master_files AS mf
     ON mf.database_id = vfs.database_id
@@ -213,49 +219,7 @@ INNER JOIN sys.master_files AS mf
 INNER JOIN sys.databases AS d
     ON d.database_id = vfs.database_id
 WHERE d.state_desc = 'ONLINE';
-"@
 
-            $fileIoRows = Invoke-DbaQuery `
-                -SqlInstance $TargetInstance `
-                -SqlCredential $SqlCredential `
-                -Database master `
-                -Query $collectQuery `
-                -QueryTimeout $QueryTimeout
-
-            foreach ($row in $fileIoRows) {
-                $databaseNameValue = if ([string]::IsNullOrWhiteSpace([string]$row.DatabaseName)) {
-                    "NULL"
-                }
-                else {
-                    "N'" + ([string]$row.DatabaseName).Replace("'", "''") + "'"
-                }
-
-                $instanceNameValue = if ([string]::IsNullOrWhiteSpace([string]$row.LogicalFileName)) {
-                    "NULL"
-                }
-                else {
-                    "N'" + ([string]$row.LogicalFileName).Replace("'", "''") + "'"
-                }
-
-                $metrics = @(
-                    @{ CounterName = "NumReads"; Value = [decimal]$row.NumReads; Unit = "count" },
-                    @{ CounterName = "NumWrites"; Value = [decimal]$row.NumWrites; Unit = "count" },
-                    @{ CounterName = "BytesRead"; Value = [decimal]$row.BytesRead; Unit = "bytes" },
-                    @{ CounterName = "BytesWritten"; Value = [decimal]$row.BytesWritten; Unit = "bytes" },
-                    @{ CounterName = "IoStallReadMs"; Value = [decimal]$row.IoStallReadMs; Unit = "ms" },
-                    @{ CounterName = "IoStallWriteMs"; Value = [decimal]$row.IoStallWriteMs; Unit = "ms" },
-                    @{ CounterName = "IoStallTotalMs"; Value = [decimal]$row.IoStallTotalMs; Unit = "ms" },
-                    @{ CounterName = "AvgReadLatencyMs"; Value = [decimal]$row.AvgReadLatencyMs; Unit = "ms" },
-                    @{ CounterName = "AvgWriteLatencyMs"; Value = [decimal]$row.AvgWriteLatencyMs; Unit = "ms" },
-                    @{ CounterName = "AvgIoLatencyMs"; Value = [decimal]$row.AvgIoLatencyMs; Unit = "ms" }
-                )
-
-                foreach ($metric in $metrics) {
-                    $counterName = $metric.CounterName.Replace("'", "''")
-                    $unit = $metric.Unit.Replace("'", "''")
-                    $metricValue = [decimal]$metric.Value
-
-                    $insertQuery = @"
 INSERT INTO dbo.MetricSnapshot
 (
     InstanceId,
@@ -270,34 +234,46 @@ INSERT INTO dbo.MetricSnapshot
     Unit,
     SourceCollector
 )
-VALUES
-(
+SELECT
     $InstanceId,
     '$captureTime',
-    $databaseNameValue,
+    m.DatabaseName,
     'DatabaseFileIO',
-    N'$counterName',
-    $instanceNameValue,
+    v.CounterName,
+    m.LogicalFileName,
     'DatabaseIO',
-    $metricValue,
+    v.MetricValue,
     'Cumulative',
-    '$unit',
+    v.Unit,
     'Collect-DatabaseIO'
-);
+FROM #FileIoMetrics AS m
+CROSS APPLY
+(
+    VALUES
+        ('NumReads', m.NumReads, 'count'),
+        ('NumWrites', m.NumWrites, 'count'),
+        ('BytesRead', m.BytesRead, 'bytes'),
+        ('BytesWritten', m.BytesWritten, 'bytes'),
+        ('IoStallReadMs', m.IoStallReadMs, 'ms'),
+        ('IoStallWriteMs', m.IoStallWriteMs, 'ms'),
+        ('IoStallTotalMs', m.IoStallTotalMs, 'ms'),
+        ('AvgReadLatencyMs', m.AvgReadLatencyMs, 'ms'),
+        ('AvgWriteLatencyMs', m.AvgWriteLatencyMs, 'ms'),
+        ('AvgIoLatencyMs', m.AvgIoLatencyMs, 'ms')
+) AS v(CounterName, MetricValue, Unit);
+
+SELECT @@ROWCOUNT AS RowsInserted;
 "@
 
-                    Write-Info "Debug insert target: SqlInstance=$CentralSqlInstance Database=$CentralDatabase Metric=$counterName Db=$($row.DatabaseName) File=$($row.LogicalFileName)"
+            $insertedCount = Invoke-DbaQuery `
+                -SqlInstance $TargetInstance `
+                -SqlCredential $SqlCredential `
+                -Database master `
+                -Query $collectAndInsertQuery `
+                -As SingleValue `
+                -QueryTimeout $QueryTimeout
 
-                    Invoke-DbaQuery `
-                        -SqlInstance $CentralSqlInstance `
-                        -SqlCredential $SqlCredential `
-                        -Database $CentralDatabase `
-                        -Query $insertQuery `
-                        -QueryTimeout 30 | Out-Null
-
-                    $RowsCollected++
-                }
-            }
+            $RowsCollected = [int]$insertedCount
 
             Complete-CollectionRun `
                 -CentralSqlInstance $CentralSqlInstance `
