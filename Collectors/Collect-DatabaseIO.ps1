@@ -119,10 +119,16 @@ try {
     $CentralDatabase = $config.CentralDatabase
 
     $QueryTimeout = 15
-    if ($null -ne $config.Collectors -and
-        $null -ne $config.Collectors.DatabaseIO -and
-        $null -ne $config.Collectors.DatabaseIO.QueryTimeoutSeconds) {
-        $QueryTimeout = [int]$config.Collectors.DatabaseIO.QueryTimeoutSeconds
+
+    if (
+        $null -ne $config.Collectors -and
+        $config.Collectors.PSObject.Properties.Name -contains "DatabaseIO"
+    ) {
+        $databaseIoConfig = $config.Collectors.DatabaseIO
+
+        if ($databaseIoConfig.PSObject.Properties.Name -contains "QueryTimeoutSeconds") {
+            $QueryTimeout = [int]$databaseIoConfig.QueryTimeoutSeconds
+        }
     }
 
     $SqlCredential = $null
@@ -171,45 +177,40 @@ ORDER BY InstanceName;
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
-            $collectAndInsertQuery = @"
+            $collectQuery = @"
 IF OBJECT_ID('tempdb..#FileIoMetrics') IS NOT NULL
-BEGIN
     DROP TABLE #FileIoMetrics;
-END;
 
 SELECT
     DatabaseName = DB_NAME(vfs.database_id),
     LogicalFileName = mf.name,
     PhysicalName = mf.physical_name,
     FileType = mf.type_desc,
-    NumReads = CAST(ISNULL(vfs.num_of_reads, 0) AS decimal(19,2)),
-    NumWrites = CAST(ISNULL(vfs.num_of_writes, 0) AS decimal(19,2)),
-    BytesRead = CAST(ISNULL(vfs.num_of_bytes_read, 0) AS decimal(19,2)),
-    BytesWritten = CAST(ISNULL(vfs.num_of_bytes_written, 0) AS decimal(19,2)),
-    IoStallReadMs = CAST(ISNULL(vfs.io_stall_read_ms, 0) AS decimal(19,2)),
-    IoStallWriteMs = CAST(ISNULL(vfs.io_stall_write_ms, 0) AS decimal(19,2)),
-    IoStallTotalMs = CAST(ISNULL(vfs.io_stall, 0) AS decimal(19,2)),
+    NumReads = CAST(ISNULL(vfs.num_of_reads, 0) AS decimal(28,6)),
+    NumWrites = CAST(ISNULL(vfs.num_of_writes, 0) AS decimal(28,6)),
+    BytesRead = CAST(ISNULL(vfs.num_of_bytes_read, 0) AS decimal(28,6)),
+    BytesWritten = CAST(ISNULL(vfs.num_of_bytes_written, 0) AS decimal(28,6)),
+    IoStallReadMs = CAST(ISNULL(vfs.io_stall_read_ms, 0) AS decimal(28,6)),
+    IoStallWriteMs = CAST(ISNULL(vfs.io_stall_write_ms, 0) AS decimal(28,6)),
+    IoStallTotalMs = CAST(ISNULL(vfs.io_stall, 0) AS decimal(28,6)),
     AvgReadLatencyMs = CAST(
         CASE
             WHEN ISNULL(vfs.num_of_reads, 0) = 0 THEN 0
-            ELSE CAST(ISNULL(vfs.io_stall_read_ms, 0) AS decimal(19,2)) / CAST(vfs.num_of_reads AS decimal(19,2))
-        END
-        AS decimal(19,2)
+            ELSE CAST(ISNULL(vfs.io_stall_read_ms, 0) AS decimal(28,6)) / CAST(vfs.num_of_reads AS decimal(28,6))
+        END AS decimal(28,6)
     ),
     AvgWriteLatencyMs = CAST(
         CASE
             WHEN ISNULL(vfs.num_of_writes, 0) = 0 THEN 0
-            ELSE CAST(ISNULL(vfs.io_stall_write_ms, 0) AS decimal(19,2)) / CAST(vfs.num_of_writes AS decimal(19,2))
-        END
-        AS decimal(19,2)
+            ELSE CAST(ISNULL(vfs.io_stall_write_ms, 0) AS decimal(28,6)) / CAST(vfs.num_of_writes AS decimal(28,6))
+        END AS decimal(28,6)
     ),
     AvgIoLatencyMs = CAST(
         CASE
             WHEN (ISNULL(vfs.num_of_reads, 0) + ISNULL(vfs.num_of_writes, 0)) = 0 THEN 0
-            ELSE CAST(ISNULL(vfs.io_stall, 0) AS decimal(19,2))
-                 / CAST((vfs.num_of_reads + vfs.num_of_writes) AS decimal(19,2))
-        END
-        AS decimal(19,2)
+            ELSE CAST(ISNULL(vfs.io_stall, 0) AS decimal(28,6))
+                 / CAST((vfs.num_of_reads + vfs.num_of_writes) AS decimal(28,6))
+        END AS decimal(28,6)
     )
 INTO #FileIoMetrics
 FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
@@ -220,32 +221,14 @@ INNER JOIN sys.databases AS d
     ON d.database_id = vfs.database_id
 WHERE d.state_desc = 'ONLINE';
 
-INSERT INTO dbo.MetricSnapshot
-(
-    InstanceId,
-    CaptureTime,
-    DatabaseName,
-    ObjectName,
-    CounterName,
-    InstanceName,
-    MetricCategory,
-    MetricValue,
-    MetricType,
-    Unit,
-    SourceCollector
-)
 SELECT
-    $InstanceId,
-    '$captureTime',
     m.DatabaseName,
-    'DatabaseFileIO',
-    v.CounterName,
     m.LogicalFileName,
-    'DatabaseIO',
+    m.PhysicalName,
+    m.FileType,
+    v.CounterName,
     v.MetricValue,
-    'Cumulative',
-    v.Unit,
-    'Collect-DatabaseIO'
+    v.Unit
 FROM #FileIoMetrics AS m
 CROSS APPLY
 (
@@ -262,18 +245,75 @@ CROSS APPLY
         ('AvgIoLatencyMs', m.AvgIoLatencyMs, 'ms')
 ) AS v(CounterName, MetricValue, Unit);
 
-SELECT @@ROWCOUNT AS RowsInserted;
+DROP TABLE #FileIoMetrics;
 "@
 
-            $insertedCount = Invoke-DbaQuery `
+            $fileIoRows = Invoke-DbaQuery `
                 -SqlInstance $TargetInstance `
                 -SqlCredential $SqlCredential `
                 -Database master `
-                -Query $collectAndInsertQuery `
-                -As SingleValue `
+                -Query $collectQuery `
                 -QueryTimeout $QueryTimeout
 
-            $RowsCollected = [int]$insertedCount
+            foreach ($row in $fileIoRows) {
+                $databaseNameValue = if ([string]::IsNullOrWhiteSpace([string]$row.DatabaseName)) {
+                    "NULL"
+                }
+                else {
+                    "N'" + ([string]$row.DatabaseName).Replace("'", "''") + "'"
+                }
+
+                $instanceNameValue = if ([string]::IsNullOrWhiteSpace([string]$row.LogicalFileName)) {
+                    "NULL"
+                }
+                else {
+                    "N'" + ([string]$row.LogicalFileName).Replace("'", "''") + "'"
+                }
+
+                $counterName = ([string]$row.CounterName).Replace("'", "''")
+                $unit = ([string]$row.Unit).Replace("'", "''")
+                $metricValue = [decimal]$row.MetricValue
+
+                $insertQuery = @"
+INSERT INTO dbo.MetricSnapshot
+(
+    InstanceId,
+    CaptureTime,
+    DatabaseName,
+    ObjectName,
+    CounterName,
+    InstanceName,
+    MetricCategory,
+    MetricValue,
+    MetricType,
+    Unit,
+    SourceCollector
+)
+VALUES
+(
+    $InstanceId,
+    '$captureTime',
+    $databaseNameValue,
+    'DatabaseFileIO',
+    N'$counterName',
+    $instanceNameValue,
+    'DatabaseIO',
+    $metricValue,
+    'Cumulative',
+    '$unit',
+    '$CollectorName'
+);
+"@
+
+                Invoke-DbaQuery `
+                    -SqlInstance $CentralSqlInstance `
+                    -SqlCredential $SqlCredential `
+                    -Database $CentralDatabase `
+                    -Query $insertQuery `
+                    -QueryTimeout 30 | Out-Null
+
+                $RowsCollected++
+            }
 
             Complete-CollectionRun `
                 -CentralSqlInstance $CentralSqlInstance `
@@ -287,9 +327,9 @@ SELECT @@ROWCOUNT AS RowsInserted;
         }
         catch {
             $err = $_.Exception.Message
-            Write-Fail "Failed on $TargetInstance : $err"
+            Write-Fail ("Failed on {0}: {1}" -f $TargetInstance, $err)
 
-            if ($CollectionRunId) {
+            if ($null -ne $CollectionRunId) {
                 Complete-CollectionRun `
                     -CentralSqlInstance $CentralSqlInstance `
                     -CentralDatabase $CentralDatabase `
@@ -307,6 +347,6 @@ SELECT @@ROWCOUNT AS RowsInserted;
     Write-Info "$CollectorName finished"
 }
 catch {
-    Write-Fail "Fatal error in $CollectorName : $($_.Exception.Message)"
+    Write-Fail ("Fatal error in {0}: {1}" -f $CollectorName, $_.Exception.Message)
     throw
 }
