@@ -181,7 +181,6 @@ WHERE counter_name IN
     'User Connections',
     'Logins/sec',
     'Logouts/sec',
-    'Transactions/sec',
     'Lock Waits/sec',
     'Number of Deadlocks/sec',
     'Page reads/sec',
