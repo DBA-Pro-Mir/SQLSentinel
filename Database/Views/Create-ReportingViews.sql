@@ -291,3 +291,20 @@ INNER JOIN dbo.MonitoredInstances mi
     ON lm.InstanceId = mi.InstanceId
 WHERE lm.MetricCategory = 'DatabaseIO';
 GO
+
+
+CREATE OR ALTER VIEW dbo.vw_RepositoryHealth
+AS
+SELECT
+    MetricSnapshotRows =
+        (SELECT COUNT(*) FROM dbo.MetricSnapshot),
+
+    MetricTextSnapshotRows =
+        (SELECT COUNT(*) FROM dbo.MetricTextSnapshot),
+
+    CollectionRunHistoryRows =
+        (SELECT COUNT(*) FROM dbo.CollectionRunHistory),
+
+    MonitoredInstances =
+        (SELECT COUNT(*) FROM dbo.MonitoredInstances WHERE IsEnabled = 1);
+GO
