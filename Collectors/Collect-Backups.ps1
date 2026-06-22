@@ -93,7 +93,7 @@ try {
     $CentralSqlInstance = $config.CentralSqlInstance
     $CentralDatabase = $config.CentralDatabase
 
-    $QueryTimeout = 20
+    $QueryTimeout = 120
     $FullBackupWarningHours = 24
     $DiffBackupWarningHours = 24
     $LogBackupWarningHours = 2
@@ -144,21 +144,24 @@ try {
         -Query @"
 SELECT
     InstanceId,
-    InstanceName
+    InstanceName,
+    ComplianceProfile = ISNULL(ComplianceProfile, 'V1_SIMPLE')
 FROM dbo.MonitoredInstances
 WHERE IsEnabled = 1
 ORDER BY InstanceName;
 "@ `
-        -QueryTimeout 30
+        -QueryTimeout 30 `
+        -EnableException
 
     foreach ($instance in $instances) {
 
         $InstanceId = [int]$instance.InstanceId
         $TargetInstance = [string]$instance.InstanceName
+        $ComplianceProfile = if ([string]::IsNullOrWhiteSpace([string]$instance.ComplianceProfile)) { "V1_SIMPLE" } else { [string]$instance.ComplianceProfile }
         $RowsCollected = 0
         $CollectionRunId = $null
 
-        Write-Info "Collecting backup status from $TargetInstance"
+        Write-Info "Collecting backup compliance from $TargetInstance using profile $ComplianceProfile"
 
         try {
             $CollectionRunId = Start-CollectionRun `
@@ -168,7 +171,21 @@ ORDER BY InstanceName;
                 -InstanceId $InstanceId `
                 -CollectorName $CollectorName
 
+            $safeComplianceProfile = $ComplianceProfile.Replace("'", "''")
+
             $backupQuery = @"
+DECLARE @ComplianceProfile varchar(20) = '$safeComplianceProfile';
+DECLARE @ExpectedRecoveryModel varchar(20) =
+    CASE
+        WHEN @ComplianceProfile = 'V2_FULL' THEN 'FULL'
+        ELSE 'SIMPLE'
+    END;
+DECLARE @RequiresLogBackups bit =
+    CASE
+        WHEN @ComplianceProfile = 'V2_FULL' THEN 1
+        ELSE 0
+    END;
+
 IF OBJECT_ID('tempdb..#BackupStatus') IS NOT NULL
     DROP TABLE #BackupStatus;
 
@@ -196,6 +213,9 @@ SELECT
     d.name AS DatabaseName,
     d.recovery_model_desc,
     d.state_desc,
+    ComplianceProfile = @ComplianceProfile,
+    ExpectedRecoveryModel = @ExpectedRecoveryModel,
+    RequiresLogBackups = @RequiresLogBackups,
     LastFullBackupTime = MAX(CASE WHEN lb.type = 'D' AND lb.rn = 1 THEN lb.backup_finish_date END),
     LastDiffBackupTime = MAX(CASE WHEN lb.type = 'I' AND lb.rn = 1 THEN lb.backup_finish_date END),
     LastLogBackupTime = MAX(CASE WHEN lb.type = 'L' AND lb.rn = 1 THEN lb.backup_finish_date END),
@@ -233,10 +253,21 @@ SELECT
         ISNULL(SUM(CASE WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 1 ELSE 0 END), 0),
     DatabasesWithOldDiffBackup =
         ISNULL(SUM(CASE WHEN LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 1 ELSE 0 END), 0),
-    FullRecoveryDatabasesWithoutLogBackup =
-        ISNULL(SUM(CASE WHEN recovery_model_desc = 'FULL' AND LastLogBackupTime IS NULL THEN 1 ELSE 0 END), 0),
-    FullRecoveryDatabasesWithOldLogBackup =
-        ISNULL(SUM(CASE WHEN recovery_model_desc = 'FULL' AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 1 ELSE 0 END), 0),
+    RecoveryModelViolations =
+        ISNULL(SUM(CASE WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 1 ELSE 0 END), 0),
+    DatabasesWithoutRequiredLogBackup =
+        ISNULL(SUM(CASE WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 1 ELSE 0 END), 0),
+    DatabasesWithOldRequiredLogBackup =
+        ISNULL(SUM(CASE WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 1 ELSE 0 END), 0),
+    NonCompliantDatabaseCount =
+        ISNULL(SUM(CASE
+            WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 1
+            WHEN LastFullBackupTime IS NULL THEN 1
+            WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 1
+            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 1
+            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 1
+            ELSE 0
+        END), 0),
     MaxFullBackupAgeHours =
         ISNULL(MAX(ISNULL(LastFullBackupAgeHours, 0)), 0),
     MaxLogBackupAgeHours =
@@ -246,6 +277,9 @@ FROM #BackupStatus;
 SELECT TOP ($MaximumDetailRows)
     DatabaseName,
     recovery_model_desc,
+    ComplianceProfile,
+    ExpectedRecoveryModel,
+    RequiresLogBackups,
     LastFullBackupTime,
     LastDiffBackupTime,
     LastLogBackupTime,
@@ -263,49 +297,60 @@ SELECT TOP ($MaximumDetailRows)
     LastLogBackupDevice,
     IssueType =
         CASE
+            WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 'RecoveryModelMismatch'
             WHEN LastFullBackupTime IS NULL THEN 'MissingFullBackup'
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'OldFullBackup'
-            WHEN recovery_model_desc = 'FULL' AND LastLogBackupTime IS NULL THEN 'MissingLogBackup'
-            WHEN recovery_model_desc = 'FULL' AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'OldLogBackup'
+            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'MissingLogBackup'
+            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'OldLogBackup'
             ELSE 'OK'
+        END,
+    Severity =
+        CASE
+            WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 'Critical'
+            WHEN LastFullBackupTime IS NULL THEN 'Critical'
+            WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'Warning'
+            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'Critical'
+            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'Critical'
+            ELSE 'Info'
         END
 FROM #BackupStatus
 WHERE
-    LastFullBackupTime IS NULL
+    recovery_model_desc <> ExpectedRecoveryModel
+    OR LastFullBackupTime IS NULL
     OR LastFullBackupAgeHours > $FullBackupWarningHours
-    OR (recovery_model_desc = 'FULL' AND LastLogBackupTime IS NULL)
-    OR (recovery_model_desc = 'FULL' AND LastLogBackupAgeHours > $LogBackupWarningHours)
+    OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL)
+    OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours)
 ORDER BY
+    CASE
+        WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 1
+        WHEN LastFullBackupTime IS NULL THEN 2
+        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 3
+        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 4
+        WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 5
+        ELSE 99
+    END,
     DatabaseName;
-
-SELECT
-    DatabaseName,
-    recovery_model_desc,
-    LastFullBackupTime,
-    LastDiffBackupTime,
-    LastLogBackupTime,
-    LastFullBackupAgeHours,
-    LastDiffBackupAgeHours,
-    LastLogBackupAgeHours,
-    LastFullBackupSizeMB,
-    LastDiffBackupSizeMB,
-    LastLogBackupSizeMB,
-    LastFullBackupDurationSeconds,
-    LastDiffBackupDurationSeconds,
-    LastLogBackupDurationSeconds
-FROM #BackupStatus
-ORDER BY DatabaseName;
 
 DROP TABLE #BackupStatus;
 "@
 
-            $results = Invoke-DbaQuery `
-                -SqlInstance $TargetInstance `
-                -SqlCredential $SqlCredential `
-                -Database master `
-                -Query $backupQuery `
-                -As DataSet `
-                -QueryTimeout $QueryTimeout
+            try {
+                $results = Invoke-DbaQuery `
+                    -SqlInstance $TargetInstance `
+                    -SqlCredential $SqlCredential `
+                    -Database master `
+                    -Query $backupQuery `
+                    -As DataSet `
+                    -QueryTimeout $QueryTimeout `
+                    -EnableException
+            }
+            catch {
+                throw "Invoke-DbaQuery failed on $TargetInstance while collecting backup compliance: $($_.Exception.Message)"
+            }
+
+            if ($null -eq $results -or $results -isnot [System.Data.DataSet] -or $results.Tables.Count -eq 0 -or $results.Tables[0].Rows.Count -eq 0) {
+                throw "Backup compliance query did not return a valid DataSet for $TargetInstance."
+            }
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
@@ -316,8 +361,10 @@ DROP TABLE #BackupStatus;
                 @{ Name = "DatabasesWithoutFullBackup"; Value = [decimal]$summary.DatabasesWithoutFullBackup; Unit = "count" },
                 @{ Name = "DatabasesWithOldFullBackup"; Value = [decimal]$summary.DatabasesWithOldFullBackup; Unit = "count" },
                 @{ Name = "DatabasesWithOldDiffBackup"; Value = [decimal]$summary.DatabasesWithOldDiffBackup; Unit = "count" },
-                @{ Name = "FullRecoveryDatabasesWithoutLogBackup"; Value = [decimal]$summary.FullRecoveryDatabasesWithoutLogBackup; Unit = "count" },
-                @{ Name = "FullRecoveryDatabasesWithOldLogBackup"; Value = [decimal]$summary.FullRecoveryDatabasesWithOldLogBackup; Unit = "count" },
+                @{ Name = "RecoveryModelViolations"; Value = [decimal]$summary.RecoveryModelViolations; Unit = "count" },
+                @{ Name = "DatabasesWithoutRequiredLogBackup"; Value = [decimal]$summary.DatabasesWithoutRequiredLogBackup; Unit = "count" },
+                @{ Name = "DatabasesWithOldRequiredLogBackup"; Value = [decimal]$summary.DatabasesWithOldRequiredLogBackup; Unit = "count" },
+                @{ Name = "NonCompliantDatabaseCount"; Value = [decimal]$summary.NonCompliantDatabaseCount; Unit = "count" },
                 @{ Name = "MaxFullBackupAgeHours"; Value = [decimal]$summary.MaxFullBackupAgeHours; Unit = "hours" },
                 @{ Name = "MaxLogBackupAgeHours"; Value = [decimal]$summary.MaxLogBackupAgeHours; Unit = "hours" }
             )
@@ -347,10 +394,10 @@ VALUES
     $InstanceId,
     '$captureTime',
     NULL,
-    'BackupSummary',
+    'BackupComplianceSummary',
     '$($metric.Name)',
     NULL,
-    'Backup',
+    'BackupCompliance',
     $($metric.Value),
     'Gauge',
     '$($metric.Unit)',
@@ -367,11 +414,16 @@ VALUES
 
                     $dbName = if ([string]::IsNullOrWhiteSpace([string]$issue.DatabaseName)) { "(unknown)" } else { [string]$issue.DatabaseName }
                     $issueType = if ([string]::IsNullOrWhiteSpace([string]$issue.IssueType)) { "Unknown" } else { [string]$issue.IssueType }
+                    $severity = if ([string]::IsNullOrWhiteSpace([string]$issue.Severity)) { "Warning" } else { [string]$issue.Severity }
 
                     $detailText = @"
 DatabaseName: $dbName
 IssueType: $issueType
-RecoveryModel: $($issue.recovery_model_desc)
+Severity: $severity
+ComplianceProfile: $($issue.ComplianceProfile)
+ExpectedRecoveryModel: $($issue.ExpectedRecoveryModel)
+ActualRecoveryModel: $($issue.recovery_model_desc)
+RequiresLogBackups: $($issue.RequiresLogBackups)
 LastFullBackupTime: $($issue.LastFullBackupTime)
 LastDiffBackupTime: $($issue.LastDiffBackupTime)
 LastLogBackupTime: $($issue.LastLogBackupTime)
@@ -391,6 +443,9 @@ LastLogBackupDevice: $($issue.LastLogBackupDevice)
 
                     $safeDetails = $detailText.Replace("'", "''")
                     $safeDbName = $dbName.Replace("'", "''")
+                    $safeIssueType = $issueType.Replace("'", "''")
+                    $safeSeverity = $severity.Replace("'", "''")
+                    $numericValue1 = if ($null -eq $issue.LastFullBackupAgeHours -or [string]::IsNullOrWhiteSpace([string]$issue.LastFullBackupAgeHours)) { 0 } else { [decimal]$issue.LastFullBackupAgeHours }
 
                     Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
@@ -414,10 +469,10 @@ VALUES
     $InstanceId,
     '$captureTime',
     N'$safeDbName',
-    'Backup',
-    '$issueType',
-    'Warning',
-    0,
+    'BackupCompliance',
+    '$safeIssueType',
+    '$safeSeverity',
+    $numericValue1,
     N'$safeDetails',
     '$CollectorName'
 );
