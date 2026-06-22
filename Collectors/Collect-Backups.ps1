@@ -254,14 +254,14 @@ SELECT
     DatabasesWithOldDiffBackup =
         ISNULL(SUM(CASE WHEN LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 1 ELSE 0 END), 0),
     RecoveryModelViolations =
-        ISNULL(SUM(CASE WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 1 ELSE 0 END), 0),
+        ISNULL(SUM(CASE WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1 ELSE 0 END), 0),
     DatabasesWithoutRequiredLogBackup =
         ISNULL(SUM(CASE WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 1 ELSE 0 END), 0),
     DatabasesWithOldRequiredLogBackup =
         ISNULL(SUM(CASE WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 1 ELSE 0 END), 0),
     NonCompliantDatabaseCount =
         ISNULL(SUM(CASE
-            WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 1
+            WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1
             WHEN LastFullBackupTime IS NULL THEN 1
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 1
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 1
@@ -297,7 +297,7 @@ SELECT TOP ($MaximumDetailRows)
     LastLogBackupDevice,
     IssueType =
         CASE
-            WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 'RecoveryModelMismatch'
+            WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 'RecoveryModelMismatch'
             WHEN LastFullBackupTime IS NULL THEN 'MissingFullBackup'
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'OldFullBackup'
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'MissingLogBackup'
@@ -306,7 +306,7 @@ SELECT TOP ($MaximumDetailRows)
         END,
     Severity =
         CASE
-            WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 'Critical'
+            WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 'Critical'
             WHEN LastFullBackupTime IS NULL THEN 'Critical'
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'Warning'
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'Critical'
@@ -315,14 +315,14 @@ SELECT TOP ($MaximumDetailRows)
         END
 FROM #BackupStatus
 WHERE
-    recovery_model_desc <> ExpectedRecoveryModel
+    recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT
     OR LastFullBackupTime IS NULL
     OR LastFullBackupAgeHours > $FullBackupWarningHours
     OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL)
     OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours)
 ORDER BY
     CASE
-        WHEN recovery_model_desc <> ExpectedRecoveryModel THEN 1
+        WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1
         WHEN LastFullBackupTime IS NULL THEN 2
         WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 3
         WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 4
