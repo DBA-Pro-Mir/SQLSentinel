@@ -93,7 +93,7 @@ try {
     $CentralSqlInstance = $config.CentralSqlInstance
     $CentralDatabase = $config.CentralDatabase
 
-    $QueryTimeout = 20
+    $QueryTimeout = 120
     $TopQueriesPerCategory = 25
     $LookbackMinutes = 60
     $MaxSqlTextLength = 4000
@@ -364,17 +364,28 @@ DROP TABLE #WorstQueries;
 DROP TABLE #QueryStats;
 "@
 
-            $results = Invoke-DbaQuery `
-                -SqlInstance $TargetInstance `
-                -SqlCredential $SqlCredential `
-                -Database master `
-                -Query $queryStatsQuery `
-                -As DataSet `
-                -QueryTimeout $QueryTimeout
+            try {
+                $results = Invoke-DbaQuery `
+                    -SqlInstance $TargetInstance `
+                    -SqlCredential $SqlCredential `
+                    -Database master `
+                    -Query $queryStatsQuery `
+                    -As DataSet `
+                    -QueryTimeout $QueryTimeout `
+                    -EnableException
+            }
+            catch {
+                throw "Invoke-DbaQuery failed on $TargetInstance while collecting query stats: $($_.Exception.Message)"
+            }
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
-            if ($results.Tables.Count -gt 0 -and $results.Tables[0].Rows.Count -gt 0) {
+            if (
+                $null -ne $results -and
+                $results -is [System.Data.DataSet] -and
+                $results.Tables.Count -gt 0 -and
+                $results.Tables[0].Rows.Count -gt 0
+            ) {
 
                 $summary = $results.Tables[0].Rows[0]
 
@@ -427,7 +438,11 @@ VALUES
                 }
             }
 
-            if ($results.Tables.Count -gt 1) {
+            if (
+                $null -ne $results -and
+                $results -is [System.Data.DataSet] -and
+                $results.Tables.Count -gt 1
+            ) {
                 foreach ($detail in $results.Tables[1].Rows) {
 
                     $safeDatabaseName = if ([string]::IsNullOrWhiteSpace([string]$detail.DatabaseName)) { "(unknown)" } else { [string]$detail.DatabaseName }
