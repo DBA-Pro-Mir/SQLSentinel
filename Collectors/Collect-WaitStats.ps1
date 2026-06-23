@@ -119,7 +119,7 @@ try {
     $CentralDatabase = $config.CentralDatabase
 
     $QueryTimeout = 15
-    $MaximumWaitTypes = 100
+    $MaximumWaitTypes = 20
 
     if (
         $null -ne $config.Collectors -and
@@ -136,6 +136,10 @@ try {
         }
     }
 
+    Write-Info "Starting $CollectorName"
+    Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
+    Write-Info "Maximum wait types per instance: $MaximumWaitTypes"
+
     $SqlCredential = $null
 
     if ($config.SqlCredential.Username -and $config.SqlCredential.Password) {
@@ -144,9 +148,6 @@ try {
             (ConvertTo-SecureString $config.SqlCredential.Password -AsPlainText -Force)
         )
     }
-
-    Write-Info "Starting $CollectorName"
-    Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
 
     $instancesQuery = @"
 SELECT
