@@ -124,7 +124,6 @@ WHERE CollectionRunId = $CollectionRunId;
 }
 
 try {
-
     if (-not (Test-Path $ConfigPath)) {
         throw "Config file not found: $ConfigPath"
     }
@@ -200,7 +199,6 @@ try {
     $SqlCredential = $null
 
     if ($config.SqlCredential.Username -and $config.SqlCredential.Password) {
-
         $SqlCredential = New-Object System.Management.Automation.PSCredential(
             $config.SqlCredential.Username,
             (ConvertTo-SecureString $config.SqlCredential.Password -AsPlainText -Force)
@@ -225,7 +223,6 @@ ORDER BY InstanceName;
         -QueryTimeout 30
 
     foreach ($instance in $instances) {
-
         $InstanceId = [int]$instance.InstanceId
         $TargetInstance = [string]$instance.InstanceName
         $RowsCollected = 0
@@ -234,7 +231,6 @@ ORDER BY InstanceName;
         Write-Info "Collecting active request metrics from $TargetInstance"
 
         try {
-
             $CollectionRunId = Start-CollectionRun `
                 -CentralSqlInstance $CentralSqlInstance `
                 -CentralDatabase $CentralDatabase `
@@ -336,7 +332,10 @@ SELECT TOP ($MaximumAttributionRows)
     TotalReads = ISNULL(SUM(CAST(reads AS bigint)), 0),
     TotalWrites = ISNULL(SUM(CAST(writes AS bigint)), 0),
     BlockedRequestCount = ISNULL(SUM(CASE WHEN blocking_session_id <> 0 THEN 1 ELSE 0 END), 0),
-    SampleWaitType = MAX(wait_type)
+    SampleWaitType = MAX(wait_type),
+    SampleDatabaseName = MAX(DatabaseName),
+    SampleHostName = MAX(HostName),
+    SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
 GROUP BY COALESCE(NULLIF(DatabaseName, ''), '(unknown)')
 ORDER BY
@@ -354,7 +353,9 @@ SELECT TOP ($MaximumAttributionRows)
     TotalReads = ISNULL(SUM(CAST(reads AS bigint)), 0),
     TotalWrites = ISNULL(SUM(CAST(writes AS bigint)), 0),
     BlockedRequestCount = ISNULL(SUM(CASE WHEN blocking_session_id <> 0 THEN 1 ELSE 0 END), 0),
+    SampleWaitType = MAX(wait_type),
     SampleDatabaseName = MAX(DatabaseName),
+    SampleHostName = MAX(HostName),
     SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
 GROUP BY COALESCE(NULLIF(HostName, ''), '(unknown)')
@@ -373,8 +374,10 @@ SELECT TOP ($MaximumAttributionRows)
     TotalReads = ISNULL(SUM(CAST(reads AS bigint)), 0),
     TotalWrites = ISNULL(SUM(CAST(writes AS bigint)), 0),
     BlockedRequestCount = ISNULL(SUM(CASE WHEN blocking_session_id <> 0 THEN 1 ELSE 0 END), 0),
+    SampleWaitType = MAX(wait_type),
     SampleDatabaseName = MAX(DatabaseName),
-    SampleHostName = MAX(HostName)
+    SampleHostName = MAX(HostName),
+    SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
 GROUP BY COALESCE(NULLIF(ProgramName, ''), '(unknown)')
 ORDER BY
@@ -392,6 +395,7 @@ SELECT TOP ($MaximumAttributionRows)
     TotalReads = ISNULL(SUM(CAST(reads AS bigint)), 0),
     TotalWrites = ISNULL(SUM(CAST(writes AS bigint)), 0),
     BlockedRequestCount = ISNULL(SUM(CASE WHEN blocking_session_id <> 0 THEN 1 ELSE 0 END), 0),
+    SampleWaitType = MAX(wait_type),
     SampleDatabaseName = MAX(DatabaseName),
     SampleHostName = MAX(HostName),
     SampleProgramName = MAX(ProgramName)
@@ -715,13 +719,11 @@ VALUES
             Write-Info "Completed $TargetInstance ($RowsCollected rows)"
         }
         catch {
-
             $err = $_.Exception.Message
 
             Write-Fail ("Failed for {0}: {1}" -f $TargetInstance, $err)
 
             if ($null -ne $CollectionRunId) {
-
                 Complete-CollectionRun `
                     -CentralSqlInstance $CentralSqlInstance `
                     -CentralDatabase $CentralDatabase `
@@ -737,7 +739,6 @@ VALUES
     Write-Info "$CollectorName completed"
 }
 catch {
-
     Write-Fail "$CollectorName failed: $($_.Exception.Message)"
     throw
 }
