@@ -1,6 +1,7 @@
 <#
 ===============================================================================
  SQLSentinel - SQL Agent Alerts Collector
+ Captures SQL Agent alert summary, configuration issues, and triggered alerts.
 ===============================================================================
 #>
 
@@ -18,6 +19,24 @@ $CollectorName = "Collect-SqlAgentAlerts"
 
 function Write-Info { param([string]$Message) Write-Host "[INFO] $Message" -ForegroundColor Cyan }
 function Write-Fail { param([string]$Message) Write-Host "[ERROR] $Message" -ForegroundColor Red }
+
+function Get-SafeDecimal {
+    param(
+        [object]$Value,
+        [decimal]$DefaultValue = 0
+    )
+
+    if ($null -eq $Value) { return $DefaultValue }
+    if ([System.DBNull]::Value.Equals($Value)) { return $DefaultValue }
+    if ([string]::IsNullOrWhiteSpace([string]$Value)) { return $DefaultValue }
+
+    try {
+        return [decimal]$Value
+    }
+    catch {
+        return $DefaultValue
+    }
+}
 
 function Start-CollectionRun {
     param(
@@ -49,7 +68,8 @@ VALUES
     'Running'
 );
 "@ `
-        -As SingleValue
+        -As SingleValue `
+        -EnableException
 }
 
 function Complete-CollectionRun {
@@ -78,7 +98,8 @@ SET
     DurationMs = DATEDIFF(MILLISECOND, StartedAt, SYSDATETIME()),
     ErrorMessage = $safeError
 WHERE CollectionRunId = $CollectionRunId;
-"@ | Out-Null
+"@ `
+        -EnableException | Out-Null
 }
 
 try {
@@ -93,7 +114,7 @@ try {
     $CentralSqlInstance = $config.CentralSqlInstance
     $CentralDatabase = $config.CentralDatabase
 
-    $QueryTimeout = 15
+    $QueryTimeout = 60
     $MaximumDetailRows = 200
     $RecentTriggerLookbackHours = 24
 
@@ -126,6 +147,7 @@ try {
 
     Write-Info "Starting $CollectorName"
     Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
+    Write-Info "Recent trigger lookback hours: $RecentTriggerLookbackHours"
 
     $instances = Invoke-DbaQuery `
         -SqlInstance $CentralSqlInstance `
@@ -139,7 +161,8 @@ FROM dbo.MonitoredInstances
 WHERE IsEnabled = 1
 ORDER BY InstanceName;
 "@ `
-        -QueryTimeout 30
+        -QueryTimeout 30 `
+        -EnableException
 
     foreach ($instance in $instances) {
 
@@ -159,6 +182,9 @@ ORDER BY InstanceName;
                 -CollectorName $CollectorName
 
             $alertQuery = @"
+IF OBJECT_ID('tempdb..#AlertBase') IS NOT NULL
+    DROP TABLE #AlertBase;
+
 IF OBJECT_ID('tempdb..#AlertDetails') IS NOT NULL
     DROP TABLE #AlertDetails;
 
@@ -201,45 +227,114 @@ SELECT
                 STUFF(STUFF(CONVERT(char(8), a.count_reset_date), 5, 0, '-'), 8, 0, '-') + ' ' +
                 STUFF(STUFF(RIGHT('000000' + CONVERT(varchar(6), a.count_reset_time), 6), 3, 0, ':'), 6, 0, ':')
             )
-        END,
-    HasNotification = CASE WHEN n.operator_id IS NULL THEN 0 ELSE 1 END,
-    OperatorName = o.name,
-    NotificationMethod =
-        CASE n.notification_method
-            WHEN 1 THEN 'Email'
-            WHEN 2 THEN 'Pager'
-            WHEN 4 THEN 'NetSend'
-            WHEN 7 THEN 'Email/Pager/NetSend'
-            ELSE
-                CASE
-                    WHEN n.notification_method IS NULL THEN '(none)'
-                    ELSE 'Other'
-                END
         END
-INTO #AlertDetails
-FROM msdb.dbo.sysalerts a
-LEFT JOIN msdb.dbo.sysnotifications n
-    ON a.id = n.alert_id
-LEFT JOIN msdb.dbo.sysoperators o
-    ON n.operator_id = o.id;
+INTO #AlertBase
+FROM msdb.dbo.sysalerts a;
 
 SELECT
-    TotalAlerts = COUNT_BIG(DISTINCT AlertId),
-    EnabledAlerts = COUNT_BIG(DISTINCT CASE WHEN IsEnabled = 1 THEN AlertId END),
-    DisabledAlerts = COUNT_BIG(DISTINCT CASE WHEN IsEnabled = 0 THEN AlertId END),
-    SeverityAlerts = COUNT_BIG(DISTINCT CASE WHEN SeverityNumber > 0 THEN AlertId END),
-    ErrorNumberAlerts = COUNT_BIG(DISTINCT CASE WHEN MessageId > 0 THEN AlertId END),
-    AlertsWithNotifications = COUNT_BIG(DISTINCT CASE WHEN HasNotification = 1 THEN AlertId END),
-    DistinctOperators = COUNT(DISTINCT OperatorName),
-    AlertsWithOccurrences = COUNT_BIG(DISTINCT CASE WHEN OccurrenceCount > 0 THEN AlertId END),
-    AlertsTriggeredRecently = COUNT_BIG(DISTINCT CASE
-        WHEN LastOccurrenceDateTime >= DATEADD(HOUR, -$RecentTriggerLookbackHours, SYSDATETIME())
-        THEN AlertId
-    END),
-    AlertsRespondedRecently = COUNT_BIG(DISTINCT CASE
-        WHEN LastResponseDateTime >= DATEADD(HOUR, -$RecentTriggerLookbackHours, SYSDATETIME())
-        THEN AlertId
-    END),
+    b.AlertId,
+    b.AlertName,
+    b.IsEnabled,
+    b.MessageId,
+    b.SeverityNumber,
+    b.DatabaseName,
+    b.EventDescriptionKeyword,
+    b.DelayBetweenResponsesSeconds,
+    b.LastOccurrenceDate,
+    b.LastOccurrenceTime,
+    b.LastOccurrenceDateTime,
+    b.LastResponseDate,
+    b.LastResponseTime,
+    b.LastResponseDateTime,
+    b.OccurrenceCount,
+    b.CountResetDate,
+    b.CountResetTime,
+    b.CountResetDateTime,
+    HasNotification =
+        CASE
+            WHEN EXISTS
+            (
+                SELECT 1
+                FROM msdb.dbo.sysnotifications n
+                WHERE n.alert_id = b.AlertId
+            )
+            THEN 1
+            ELSE 0
+        END,
+    OperatorNames =
+        ISNULL
+        (
+            STUFF
+            (
+                (
+                    SELECT DISTINCT ', ' + ISNULL(o.name, '(none)')
+                    FROM msdb.dbo.sysnotifications n
+                    LEFT JOIN msdb.dbo.sysoperators o
+                        ON n.operator_id = o.id
+                    WHERE n.alert_id = b.AlertId
+                    FOR XML PATH(''), TYPE
+                ).value('.', 'nvarchar(max)'),
+                1,
+                2,
+                ''
+            ),
+            '(none)'
+        ),
+    NotificationMethods =
+        ISNULL
+        (
+            STUFF
+            (
+                (
+                    SELECT DISTINCT ', ' +
+                        CASE n.notification_method
+                            WHEN 1 THEN 'Email'
+                            WHEN 2 THEN 'Pager'
+                            WHEN 4 THEN 'NetSend'
+                            WHEN 7 THEN 'Email/Pager/NetSend'
+                            ELSE
+                                CASE
+                                    WHEN n.notification_method IS NULL THEN '(none)'
+                                    ELSE 'Other'
+                                END
+                        END
+                    FROM msdb.dbo.sysnotifications n
+                    WHERE n.alert_id = b.AlertId
+                    FOR XML PATH(''), TYPE
+                ).value('.', 'nvarchar(max)'),
+                1,
+                2,
+                ''
+            ),
+            '(none)'
+        ),
+    WasTriggeredRecently =
+        CASE
+            WHEN b.LastOccurrenceDateTime >= DATEADD(HOUR, -$RecentTriggerLookbackHours, SYSDATETIME())
+            THEN 1
+            ELSE 0
+        END,
+    AlertSeverity =
+        CASE
+            WHEN b.SeverityNumber >= 20 OR b.MessageId IN (823, 824, 825, 9001, 17053) THEN 'Critical'
+            WHEN b.SeverityNumber BETWEEN 16 AND 19 THEN 'Warning'
+            WHEN b.MessageId > 0 THEN 'Warning'
+            ELSE 'Info'
+        END
+INTO #AlertDetails
+FROM #AlertBase b;
+
+SELECT
+    TotalAlerts = COUNT_BIG(1),
+    EnabledAlerts = SUM(CASE WHEN IsEnabled = 1 THEN 1 ELSE 0 END),
+    DisabledAlerts = SUM(CASE WHEN IsEnabled = 0 THEN 1 ELSE 0 END),
+    SeverityAlerts = SUM(CASE WHEN SeverityNumber > 0 THEN 1 ELSE 0 END),
+    ErrorNumberAlerts = SUM(CASE WHEN MessageId > 0 THEN 1 ELSE 0 END),
+    AlertsWithNotifications = SUM(CASE WHEN HasNotification = 1 THEN 1 ELSE 0 END),
+    AlertsWithoutNotifications = SUM(CASE WHEN HasNotification = 0 THEN 1 ELSE 0 END),
+    AlertsWithOccurrences = SUM(CASE WHEN OccurrenceCount > 0 THEN 1 ELSE 0 END),
+    AlertsTriggeredRecently = SUM(CASE WHEN WasTriggeredRecently = 1 THEN 1 ELSE 0 END),
+    AlertsRespondedRecently = SUM(CASE WHEN LastResponseDateTime >= DATEADD(HOUR, -$RecentTriggerLookbackHours, SYSDATETIME()) THEN 1 ELSE 0 END),
     MaxOccurrenceCount = ISNULL(MAX(OccurrenceCount), 0)
 FROM #AlertDetails;
 
@@ -263,50 +358,113 @@ SELECT TOP ($MaximumDetailRows)
     CountResetTime,
     CountResetDateTime,
     HasNotification,
-    OperatorName,
-    NotificationMethod,
-    WasTriggeredRecently =
+    OperatorNames,
+    NotificationMethods,
+    WasTriggeredRecently,
+    AlertSeverity,
+    DetailType =
         CASE
-            WHEN LastOccurrenceDateTime >= DATEADD(HOUR, -$RecentTriggerLookbackHours, SYSDATETIME())
-            THEN 1
-            ELSE 0
+            WHEN IsEnabled = 0 THEN 'AlertConfigIssue'
+            WHEN HasNotification = 0 THEN 'AlertConfigIssue'
+            ELSE 'AlertConfig'
+        END,
+    IssueReason =
+        CASE
+            WHEN IsEnabled = 0 THEN 'Alert disabled'
+            WHEN HasNotification = 0 THEN 'Alert has no notification'
+            ELSE 'Configured'
         END
 FROM #AlertDetails
+WHERE IsEnabled = 0
+   OR HasNotification = 0
 ORDER BY
-    WasTriggeredRecently DESC,
-    OccurrenceCount DESC,
-    LastOccurrenceDateTime DESC,
-    IsEnabled DESC,
+    IsEnabled,
+    HasNotification,
+    AlertName;
+
+SELECT TOP ($MaximumDetailRows)
+    AlertId,
     AlertName,
-    OperatorName;
+    IsEnabled,
+    MessageId,
+    SeverityNumber,
+    DatabaseName,
+    EventDescriptionKeyword,
+    DelayBetweenResponsesSeconds,
+    LastOccurrenceDate,
+    LastOccurrenceTime,
+    LastOccurrenceDateTime,
+    LastResponseDate,
+    LastResponseTime,
+    LastResponseDateTime,
+    OccurrenceCount,
+    CountResetDate,
+    CountResetTime,
+    CountResetDateTime,
+    HasNotification,
+    OperatorNames,
+    NotificationMethods,
+    WasTriggeredRecently,
+    AlertSeverity,
+    DetailType = 'AlertTriggered',
+    IssueReason = 'Alert triggered recently'
+FROM #AlertDetails
+WHERE IsEnabled = 1
+  AND OccurrenceCount > 0
+  AND WasTriggeredRecently = 1
+ORDER BY
+    CASE AlertSeverity
+        WHEN 'Critical' THEN 1
+        WHEN 'Warning' THEN 2
+        ELSE 3
+    END,
+    LastOccurrenceDateTime DESC,
+    OccurrenceCount DESC,
+    AlertName;
 
 DROP TABLE #AlertDetails;
+DROP TABLE #AlertBase;
 "@
 
-            $results = Invoke-DbaQuery `
-                -SqlInstance $TargetInstance `
-                -SqlCredential $SqlCredential `
-                -Database msdb `
-                -Query $alertQuery `
-                -As DataSet `
-                -QueryTimeout $QueryTimeout
+            try {
+                $results = Invoke-DbaQuery `
+                    -SqlInstance $TargetInstance `
+                    -SqlCredential $SqlCredential `
+                    -Database msdb `
+                    -Query $alertQuery `
+                    -As DataSet `
+                    -QueryTimeout $QueryTimeout `
+                    -EnableException
+            }
+            catch {
+                throw "Invoke-DbaQuery failed on $TargetInstance while collecting SQL Agent alerts: $($_.Exception.Message)"
+            }
+
+            if (
+                $null -eq $results -or
+                $results -isnot [System.Data.DataSet] -or
+                $results.Tables.Count -eq 0 -or
+                $results.Tables[0].Rows.Count -eq 0
+            ) {
+                throw "SQL Agent alert query did not return a valid DataSet for $TargetInstance."
+            }
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
             $summary = $results.Tables[0].Rows[0]
 
             $summaryMetrics = @(
-                @{ Name = "TotalAlerts"; Value = [decimal]$summary.TotalAlerts; Unit = "count" },
-                @{ Name = "EnabledAlerts"; Value = [decimal]$summary.EnabledAlerts; Unit = "count" },
-                @{ Name = "DisabledAlerts"; Value = [decimal]$summary.DisabledAlerts; Unit = "count" },
-                @{ Name = "SeverityAlerts"; Value = [decimal]$summary.SeverityAlerts; Unit = "count" },
-                @{ Name = "ErrorNumberAlerts"; Value = [decimal]$summary.ErrorNumberAlerts; Unit = "count" },
-                @{ Name = "AlertsWithNotifications"; Value = [decimal]$summary.AlertsWithNotifications; Unit = "count" },
-                @{ Name = "DistinctOperators"; Value = [decimal]$summary.DistinctOperators; Unit = "count" },
-                @{ Name = "AlertsWithOccurrences"; Value = [decimal]$summary.AlertsWithOccurrences; Unit = "count" },
-                @{ Name = "AlertsTriggeredRecently"; Value = [decimal]$summary.AlertsTriggeredRecently; Unit = "count" },
-                @{ Name = "AlertsRespondedRecently"; Value = [decimal]$summary.AlertsRespondedRecently; Unit = "count" },
-                @{ Name = "MaxOccurrenceCount"; Value = [decimal]$summary.MaxOccurrenceCount; Unit = "count" }
+                @{ Name = "TotalAlerts"; Value = (Get-SafeDecimal $summary.TotalAlerts); Unit = "count" },
+                @{ Name = "EnabledAlerts"; Value = (Get-SafeDecimal $summary.EnabledAlerts); Unit = "count" },
+                @{ Name = "DisabledAlerts"; Value = (Get-SafeDecimal $summary.DisabledAlerts); Unit = "count" },
+                @{ Name = "SeverityAlerts"; Value = (Get-SafeDecimal $summary.SeverityAlerts); Unit = "count" },
+                @{ Name = "ErrorNumberAlerts"; Value = (Get-SafeDecimal $summary.ErrorNumberAlerts); Unit = "count" },
+                @{ Name = "AlertsWithNotifications"; Value = (Get-SafeDecimal $summary.AlertsWithNotifications); Unit = "count" },
+                @{ Name = "AlertsWithoutNotifications"; Value = (Get-SafeDecimal $summary.AlertsWithoutNotifications); Unit = "count" },
+                @{ Name = "AlertsWithOccurrences"; Value = (Get-SafeDecimal $summary.AlertsWithOccurrences); Unit = "count" },
+                @{ Name = "AlertsTriggeredRecently"; Value = (Get-SafeDecimal $summary.AlertsTriggeredRecently); Unit = "count" },
+                @{ Name = "AlertsRespondedRecently"; Value = (Get-SafeDecimal $summary.AlertsRespondedRecently); Unit = "count" },
+                @{ Name = "MaxOccurrenceCount"; Value = (Get-SafeDecimal $summary.MaxOccurrenceCount); Unit = "count" }
             )
 
             foreach ($metric in $summaryMetrics) {
@@ -344,40 +502,54 @@ VALUES
     '$CollectorName'
 );
 "@ `
-                    -QueryTimeout $QueryTimeout | Out-Null
+                    -QueryTimeout $QueryTimeout `
+                    -EnableException | Out-Null
 
                 $RowsCollected++
             }
 
-            if ($results.Tables.Count -gt 1) {
-                foreach ($alert in $results.Tables[1].Rows) {
+            $detailTableIndexes = @(1, 2)
+
+            foreach ($tableIndex in $detailTableIndexes) {
+                if ($results.Tables.Count -le $tableIndex) {
+                    continue
+                }
+
+                foreach ($alert in $results.Tables[$tableIndex].Rows) {
 
                     $alertName = if ([string]::IsNullOrWhiteSpace([string]$alert.AlertName)) { "(unknown)" } else { [string]$alert.AlertName }
-                    $operatorName = if ([string]::IsNullOrWhiteSpace([string]$alert.OperatorName)) { "(none)" } else { [string]$alert.OperatorName }
-                    $notificationMethod = if ([string]::IsNullOrWhiteSpace([string]$alert.NotificationMethod)) { "(none)" } else { [string]$alert.NotificationMethod }
+                    $operatorNames = if ([string]::IsNullOrWhiteSpace([string]$alert.OperatorNames)) { "(none)" } else { [string]$alert.OperatorNames }
+                    $notificationMethods = if ([string]::IsNullOrWhiteSpace([string]$alert.NotificationMethods)) { "(none)" } else { [string]$alert.NotificationMethods }
                     $eventKeyword = if ([string]::IsNullOrWhiteSpace([string]$alert.EventDescriptionKeyword)) { "(none)" } else { [string]$alert.EventDescriptionKeyword }
                     $alertDbName = if ([string]::IsNullOrWhiteSpace([string]$alert.DatabaseName)) { "(none)" } else { [string]$alert.DatabaseName }
+                    $detailType = if ([string]::IsNullOrWhiteSpace([string]$alert.DetailType)) { "AlertDetail" } else { [string]$alert.DetailType }
+                    $issueReason = if ([string]::IsNullOrWhiteSpace([string]$alert.IssueReason)) { "(none)" } else { [string]$alert.IssueReason }
 
-                    $severity = if ([int]$alert.WasTriggeredRecently -eq 1) {
-                        "Warning"
+                    $severity = if ($detailType -eq "AlertTriggered") {
+                        if ([string]::IsNullOrWhiteSpace([string]$alert.AlertSeverity)) { "Warning" } else { [string]$alert.AlertSeverity }
                     }
-                    elseif ([int]$alert.IsEnabled -eq 0) {
+                    elseif ($detailType -eq "AlertConfigIssue") {
                         "Warning"
                     }
                     else {
                         "Info"
                     }
 
+                    $occurrenceCount = Get-SafeDecimal $alert.OccurrenceCount
+                    $wasTriggeredRecently = Get-SafeDecimal $alert.WasTriggeredRecently
+
                     $detailText = @"
 AlertId: $($alert.AlertId)
 AlertName: $alertName
+DetailType: $detailType
+IssueReason: $issueReason
 IsEnabled: $($alert.IsEnabled)
 MessageId: $($alert.MessageId)
 SeverityNumber: $($alert.SeverityNumber)
 DatabaseName: $alertDbName
 EventDescriptionKeyword: $eventKeyword
 DelayBetweenResponsesSeconds: $($alert.DelayBetweenResponsesSeconds)
-OccurrenceCount: $($alert.OccurrenceCount)
+OccurrenceCount: $occurrenceCount
 LastOccurrenceDate: $($alert.LastOccurrenceDate)
 LastOccurrenceTime: $($alert.LastOccurrenceTime)
 LastOccurrenceDateTime: $($alert.LastOccurrenceDateTime)
@@ -387,13 +559,15 @@ LastResponseDateTime: $($alert.LastResponseDateTime)
 CountResetDate: $($alert.CountResetDate)
 CountResetTime: $($alert.CountResetTime)
 CountResetDateTime: $($alert.CountResetDateTime)
-WasTriggeredRecently: $($alert.WasTriggeredRecently)
+WasTriggeredRecently: $wasTriggeredRecently
 HasNotification: $($alert.HasNotification)
-OperatorName: $operatorName
-NotificationMethod: $notificationMethod
+OperatorNames: $operatorNames
+NotificationMethods: $notificationMethods
 "@
 
                     $safeDetails = $detailText.Replace("'", "''")
+                    $safeDetailType = $detailType.Replace("'", "''")
+                    $safeSeverity = $severity.Replace("'", "''")
 
                     Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
@@ -417,15 +591,16 @@ VALUES
     $InstanceId,
     '$captureTime',
     'SqlAgentAlert',
-    'AlertDetail',
-    '$severity',
-    $([decimal]$alert.OccurrenceCount),
-    $([decimal]$alert.WasTriggeredRecently),
+    '$safeDetailType',
+    '$safeSeverity',
+    $occurrenceCount,
+    $wasTriggeredRecently,
     N'$safeDetails',
     '$CollectorName'
 );
 "@ `
-                        -QueryTimeout $QueryTimeout | Out-Null
+                        -QueryTimeout $QueryTimeout `
+                        -EnableException | Out-Null
 
                     $RowsCollected++
                 }
