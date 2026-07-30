@@ -1,7 +1,9 @@
 <#
 ===============================================================================
- SQLSentinel - Query Stats Collector
+ SQLSentinel - Query Stats Collector V2
 ===============================================================================
+ Collects a bounded set of expensive cached queries without applying SQL text
+ and plan-attribute functions to the entire plan cache.
 #>
 
 [CmdletBinding()]
@@ -86,6 +88,10 @@ try {
         throw "Config file not found: $ConfigPath"
     }
 
+    if (-not (Get-Module -ListAvailable -Name dbatools)) {
+        throw "dbatools module is not installed."
+    }
+
     Import-Module dbatools
 
     $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
@@ -96,7 +102,7 @@ try {
     $QueryTimeout = 120
     $TopQueriesPerCategory = 25
     $LookbackMinutes = 60
-    $MaxSqlTextLength = 4000
+    $MaxSqlTextLength = 1000
     $MinimumExecutionCount = 1
 
     if ($null -ne $config.Collectors -and
@@ -125,6 +131,13 @@ try {
         }
     }
 
+    if ($TopQueriesPerCategory -lt 1) { $TopQueriesPerCategory = 1 }
+    if ($TopQueriesPerCategory -gt 100) { $TopQueriesPerCategory = 100 }
+    if ($LookbackMinutes -lt 1) { $LookbackMinutes = 60 }
+    if ($MaxSqlTextLength -lt 100) { $MaxSqlTextLength = 100 }
+    if ($MaxSqlTextLength -gt 4000) { $MaxSqlTextLength = 4000 }
+    if ($MinimumExecutionCount -lt 1) { $MinimumExecutionCount = 1 }
+
     $SqlCredential = $null
 
     if ($config.SqlCredential.Username -and $config.SqlCredential.Password) {
@@ -136,6 +149,7 @@ try {
 
     Write-Info "Starting $CollectorName"
     Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
+    Write-Info "V2 settings: Top $TopQueriesPerCategory per category; lookback $LookbackMinutes minutes; SQL text $MaxSqlTextLength characters"
 
     $instances = Invoke-DbaQuery `
         -SqlInstance $CentralSqlInstance `
@@ -152,7 +166,6 @@ ORDER BY InstanceName;
         -QueryTimeout 30
 
     foreach ($instance in $instances) {
-
         $InstanceId = [int]$instance.InstanceId
         $TargetInstance = [string]$instance.InstanceName
         $RowsCollected = 0
@@ -169,170 +182,158 @@ ORDER BY InstanceName;
                 -CollectorName $CollectorName
 
             $queryStatsQuery = @"
-IF OBJECT_ID('tempdb..#QueryStats') IS NOT NULL
-    DROP TABLE #QueryStats;
+SET NOCOUNT ON;
+SET LOCK_TIMEOUT 5000;
 
-SELECT
-    RankingCategory = CAST(NULL AS varchar(30)),
-    DatabaseName = DB_NAME(CONVERT(int, pa.value)),
-    qs.query_hash,
-    qs.query_plan_hash,
-    qs.execution_count,
-    qs.creation_time,
-    qs.last_execution_time,
-    TotalCpuMs = CONVERT(decimal(19,2), qs.total_worker_time / 1000.0),
-    AvgCpuMs = CONVERT(decimal(19,2), (qs.total_worker_time / 1000.0) / NULLIF(qs.execution_count, 0)),
-    TotalElapsedMs = CONVERT(decimal(19,2), qs.total_elapsed_time / 1000.0),
-    AvgElapsedMs = CONVERT(decimal(19,2), (qs.total_elapsed_time / 1000.0) / NULLIF(qs.execution_count, 0)),
-    TotalLogicalReads = CONVERT(decimal(19,2), qs.total_logical_reads),
-    AvgLogicalReads = CONVERT(decimal(19,2), qs.total_logical_reads / NULLIF(qs.execution_count, 0)),
-    TotalPhysicalReads = CONVERT(decimal(19,2), qs.total_physical_reads),
-    AvgPhysicalReads = CONVERT(decimal(19,2), qs.total_physical_reads / NULLIF(qs.execution_count, 0)),
-    TotalWrites = CONVERT(decimal(19,2), qs.total_logical_writes),
-    AvgWrites = CONVERT(decimal(19,2), qs.total_logical_writes / NULLIF(qs.execution_count, 0)),
-    SqlText = LEFT(REPLACE(REPLACE(CONVERT(nvarchar(max), st.text), CHAR(13), ' '), CHAR(10), ' '), $MaxSqlTextLength)
-INTO #QueryStats
-FROM sys.dm_exec_query_stats qs
-CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-OUTER APPLY sys.dm_exec_plan_attributes(qs.plan_handle) pa
-WHERE pa.attribute = 'dbid'
-  AND qs.last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
-  AND qs.execution_count >= $MinimumExecutionCount
-  AND CONVERT(nvarchar(max), st.text) NOT LIKE '%MetricSnapshot%'
-  AND CONVERT(nvarchar(max), st.text) NOT LIKE '%MetricTextSnapshot%'
-  AND CONVERT(nvarchar(max), st.text) NOT LIKE '%CollectionRunHistory%'
-  AND CONVERT(nvarchar(max), st.text) NOT LIKE '%SQLSentinel%'
-  AND CONVERT(nvarchar(max), st.text) NOT LIKE '%sys.dm_exec_query_stats%';
+IF OBJECT_ID('tempdb..#Candidates') IS NOT NULL DROP TABLE #Candidates;
+IF OBJECT_ID('tempdb..#CandidateDetails') IS NOT NULL DROP TABLE #CandidateDetails;
 
-IF OBJECT_ID('tempdb..#WorstQueries') IS NOT NULL
-    DROP TABLE #WorstQueries;
-
-CREATE TABLE #WorstQueries
+CREATE TABLE #Candidates
 (
     RankingCategory varchar(30) NOT NULL,
-    DatabaseName sysname NULL,
+    sql_handle varbinary(64) NOT NULL,
+    plan_handle varbinary(64) NOT NULL,
     query_hash binary(8) NULL,
     query_plan_hash binary(8) NULL,
     execution_count bigint NOT NULL,
     creation_time datetime NOT NULL,
     last_execution_time datetime NOT NULL,
-    TotalCpuMs decimal(19,2) NULL,
-    AvgCpuMs decimal(19,2) NULL,
-    TotalElapsedMs decimal(19,2) NULL,
-    AvgElapsedMs decimal(19,2) NULL,
-    TotalLogicalReads decimal(19,2) NULL,
-    AvgLogicalReads decimal(19,2) NULL,
-    TotalPhysicalReads decimal(19,2) NULL,
-    AvgPhysicalReads decimal(19,2) NULL,
-    TotalWrites decimal(19,2) NULL,
-    AvgWrites decimal(19,2) NULL,
-    SqlText nvarchar(max) NULL
+    total_worker_time bigint NOT NULL,
+    total_elapsed_time bigint NOT NULL,
+    total_logical_reads bigint NOT NULL,
+    total_physical_reads bigint NOT NULL,
+    total_logical_writes bigint NOT NULL
 );
 
-INSERT INTO #WorstQueries
+INSERT INTO #Candidates
 SELECT TOP ($TopQueriesPerCategory)
-    'CPU',
-    DatabaseName,
-    query_hash,
-    query_plan_hash,
-    execution_count,
-    creation_time,
-    last_execution_time,
-    TotalCpuMs,
-    AvgCpuMs,
-    TotalElapsedMs,
-    AvgElapsedMs,
-    TotalLogicalReads,
-    AvgLogicalReads,
-    TotalPhysicalReads,
-    AvgPhysicalReads,
-    TotalWrites,
-    AvgWrites,
-    SqlText
-FROM #QueryStats
-ORDER BY TotalCpuMs DESC;
+    'CPU', sql_handle, plan_handle, query_hash, query_plan_hash,
+    execution_count, creation_time, last_execution_time,
+    total_worker_time, total_elapsed_time, total_logical_reads,
+    total_physical_reads, total_logical_writes
+FROM sys.dm_exec_query_stats
+WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
+  AND execution_count >= $MinimumExecutionCount
+ORDER BY total_worker_time DESC;
 
-INSERT INTO #WorstQueries
+INSERT INTO #Candidates
 SELECT TOP ($TopQueriesPerCategory)
-    'Duration',
-    DatabaseName,
-    query_hash,
-    query_plan_hash,
-    execution_count,
-    creation_time,
-    last_execution_time,
-    TotalCpuMs,
-    AvgCpuMs,
-    TotalElapsedMs,
-    AvgElapsedMs,
-    TotalLogicalReads,
-    AvgLogicalReads,
-    TotalPhysicalReads,
-    AvgPhysicalReads,
-    TotalWrites,
-    AvgWrites,
-    SqlText
-FROM #QueryStats
-ORDER BY TotalElapsedMs DESC;
+    'Duration', sql_handle, plan_handle, query_hash, query_plan_hash,
+    execution_count, creation_time, last_execution_time,
+    total_worker_time, total_elapsed_time, total_logical_reads,
+    total_physical_reads, total_logical_writes
+FROM sys.dm_exec_query_stats
+WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
+  AND execution_count >= $MinimumExecutionCount
+ORDER BY total_elapsed_time DESC;
 
-INSERT INTO #WorstQueries
+INSERT INTO #Candidates
 SELECT TOP ($TopQueriesPerCategory)
-    'LogicalReads',
-    DatabaseName,
-    query_hash,
-    query_plan_hash,
-    execution_count,
-    creation_time,
-    last_execution_time,
-    TotalCpuMs,
-    AvgCpuMs,
-    TotalElapsedMs,
-    AvgElapsedMs,
-    TotalLogicalReads,
-    AvgLogicalReads,
-    TotalPhysicalReads,
-    AvgPhysicalReads,
-    TotalWrites,
-    AvgWrites,
-    SqlText
-FROM #QueryStats
-ORDER BY TotalLogicalReads DESC;
+    'LogicalReads', sql_handle, plan_handle, query_hash, query_plan_hash,
+    execution_count, creation_time, last_execution_time,
+    total_worker_time, total_elapsed_time, total_logical_reads,
+    total_physical_reads, total_logical_writes
+FROM sys.dm_exec_query_stats
+WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
+  AND execution_count >= $MinimumExecutionCount
+ORDER BY total_logical_reads DESC;
 
-INSERT INTO #WorstQueries
+INSERT INTO #Candidates
 SELECT TOP ($TopQueriesPerCategory)
-    'Executions',
-    DatabaseName,
-    query_hash,
-    query_plan_hash,
-    execution_count,
-    creation_time,
-    last_execution_time,
-    TotalCpuMs,
-    AvgCpuMs,
-    TotalElapsedMs,
-    AvgElapsedMs,
-    TotalLogicalReads,
-    AvgLogicalReads,
-    TotalPhysicalReads,
-    AvgPhysicalReads,
-    TotalWrites,
-    AvgWrites,
-    SqlText
-FROM #QueryStats
+    'Executions', sql_handle, plan_handle, query_hash, query_plan_hash,
+    execution_count, creation_time, last_execution_time,
+    total_worker_time, total_elapsed_time, total_logical_reads,
+    total_physical_reads, total_logical_writes
+FROM sys.dm_exec_query_stats
+WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
+  AND execution_count >= $MinimumExecutionCount
 ORDER BY execution_count DESC;
 
+;WITH Deduplicated AS
+(
+    SELECT
+        c.*,
+        rn = ROW_NUMBER() OVER
+        (
+            PARTITION BY
+                c.RankingCategory,
+                ISNULL(c.query_hash, 0x0000000000000000),
+                ISNULL(c.query_plan_hash, 0x0000000000000000)
+            ORDER BY
+                c.total_worker_time DESC,
+                c.total_elapsed_time DESC,
+                c.last_execution_time DESC
+        )
+    FROM #Candidates c
+), Enriched AS
+(
+    SELECT
+        d.RankingCategory,
+        DatabaseName = DB_NAME(CONVERT(int, pa.value)),
+        d.query_hash,
+        d.query_plan_hash,
+        d.execution_count,
+        d.creation_time,
+        d.last_execution_time,
+        TotalCpuMs = CONVERT(decimal(19,2), d.total_worker_time / 1000.0),
+        AvgCpuMs = CONVERT(decimal(19,2), (d.total_worker_time / 1000.0) / NULLIF(d.execution_count, 0)),
+        TotalElapsedMs = CONVERT(decimal(19,2), d.total_elapsed_time / 1000.0),
+        AvgElapsedMs = CONVERT(decimal(19,2), (d.total_elapsed_time / 1000.0) / NULLIF(d.execution_count, 0)),
+        TotalLogicalReads = CONVERT(decimal(19,2), d.total_logical_reads),
+        AvgLogicalReads = CONVERT(decimal(19,2), d.total_logical_reads * 1.0 / NULLIF(d.execution_count, 0)),
+        TotalPhysicalReads = CONVERT(decimal(19,2), d.total_physical_reads),
+        AvgPhysicalReads = CONVERT(decimal(19,2), d.total_physical_reads * 1.0 / NULLIF(d.execution_count, 0)),
+        TotalWrites = CONVERT(decimal(19,2), d.total_logical_writes),
+        AvgWrites = CONVERT(decimal(19,2), d.total_logical_writes * 1.0 / NULLIF(d.execution_count, 0)),
+        RawSqlText = CONVERT(nvarchar(max), st.text)
+    FROM Deduplicated d
+    CROSS APPLY sys.dm_exec_sql_text(d.sql_handle) st
+    OUTER APPLY
+    (
+        SELECT TOP (1) value
+        FROM sys.dm_exec_plan_attributes(d.plan_handle)
+        WHERE attribute = 'dbid'
+    ) pa
+    WHERE d.rn = 1
+)
 SELECT
-    TopCpuQueryCount =
-        SUM(CASE WHEN RankingCategory = 'CPU' THEN 1 ELSE 0 END),
-    TopDurationQueryCount =
-        SUM(CASE WHEN RankingCategory = 'Duration' THEN 1 ELSE 0 END),
-    TopLogicalReadQueryCount =
-        SUM(CASE WHEN RankingCategory = 'LogicalReads' THEN 1 ELSE 0 END),
-    TopExecutionQueryCount =
-        SUM(CASE WHEN RankingCategory = 'Executions' THEN 1 ELSE 0 END),
-    DistinctQueriesCaptured =
-        COUNT(DISTINCT CONVERT(varchar(34), query_hash, 1))
-FROM #WorstQueries;
+    RankingCategory,
+    DatabaseName,
+    query_hash,
+    query_plan_hash,
+    execution_count,
+    creation_time,
+    last_execution_time,
+    TotalCpuMs,
+    AvgCpuMs,
+    TotalElapsedMs,
+    AvgElapsedMs,
+    TotalLogicalReads,
+    AvgLogicalReads,
+    TotalPhysicalReads,
+    AvgPhysicalReads,
+    TotalWrites,
+    AvgWrites,
+    SqlText = LEFT(REPLACE(REPLACE(RawSqlText, CHAR(13), ' '), CHAR(10), ' '), $MaxSqlTextLength)
+INTO #CandidateDetails
+FROM Enriched
+WHERE RawSqlText NOT LIKE '%MetricSnapshot%'
+  AND RawSqlText NOT LIKE '%MetricTextSnapshot%'
+  AND RawSqlText NOT LIKE '%CollectionRunHistory%'
+  AND RawSqlText NOT LIKE '%SQLSentinel%'
+  AND RawSqlText NOT LIKE '%sys.dm_exec_query_stats%';
+
+SELECT
+    TopCpuQueryCount = SUM(CASE WHEN RankingCategory = 'CPU' THEN 1 ELSE 0 END),
+    TopDurationQueryCount = SUM(CASE WHEN RankingCategory = 'Duration' THEN 1 ELSE 0 END),
+    TopLogicalReadQueryCount = SUM(CASE WHEN RankingCategory = 'LogicalReads' THEN 1 ELSE 0 END),
+    TopExecutionQueryCount = SUM(CASE WHEN RankingCategory = 'Executions' THEN 1 ELSE 0 END),
+    DistinctQueriesCaptured = COUNT(DISTINCT
+        CONCAT(
+            CONVERT(varchar(34), query_hash, 1), ':',
+            CONVERT(varchar(34), query_plan_hash, 1)
+        ))
+FROM #CandidateDetails;
 
 SELECT
     RankingCategory,
@@ -353,15 +354,21 @@ SELECT
     TotalWrites,
     AvgWrites,
     SqlText
-FROM #WorstQueries
+FROM #CandidateDetails
 ORDER BY
-    RankingCategory,
+    CASE RankingCategory
+        WHEN 'CPU' THEN 1
+        WHEN 'Duration' THEN 2
+        WHEN 'LogicalReads' THEN 3
+        WHEN 'Executions' THEN 4
+        ELSE 5
+    END,
     TotalCpuMs DESC,
     TotalElapsedMs DESC,
     TotalLogicalReads DESC;
 
-DROP TABLE #WorstQueries;
-DROP TABLE #QueryStats;
+DROP TABLE #CandidateDetails;
+DROP TABLE #Candidates;
 "@
 
             try {
@@ -380,12 +387,10 @@ DROP TABLE #QueryStats;
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
-            if (
-                $null -ne $results -and
+            if ($null -ne $results -and
                 $results -is [System.Data.DataSet] -and
                 $results.Tables.Count -gt 0 -and
-                $results.Tables[0].Rows.Count -gt 0
-            ) {
+                $results.Tables[0].Rows.Count -gt 0) {
 
                 $summary = $results.Tables[0].Rows[0]
 
@@ -405,31 +410,13 @@ DROP TABLE #QueryStats;
                         -Query @"
 INSERT INTO dbo.MetricSnapshot
 (
-    InstanceId,
-    CaptureTime,
-    DatabaseName,
-    ObjectName,
-    CounterName,
-    InstanceName,
-    MetricCategory,
-    MetricValue,
-    MetricType,
-    Unit,
-    SourceCollector
+    InstanceId, CaptureTime, DatabaseName, ObjectName, CounterName,
+    InstanceName, MetricCategory, MetricValue, MetricType, Unit, SourceCollector
 )
 VALUES
 (
-    $InstanceId,
-    '$captureTime',
-    NULL,
-    'QueryStatsSummary',
-    '$($metric.Name)',
-    NULL,
-    'QueryStats',
-    $($metric.Value),
-    'Gauge',
-    '$($metric.Unit)',
-    '$CollectorName'
+    $InstanceId, '$captureTime', NULL, 'QueryStatsSummary', '$($metric.Name)',
+    NULL, 'QueryStats', $($metric.Value), 'Gauge', '$($metric.Unit)', '$CollectorName'
 );
 "@ `
                         -QueryTimeout $QueryTimeout | Out-Null
@@ -438,13 +425,11 @@ VALUES
                 }
             }
 
-            if (
-                $null -ne $results -and
+            if ($null -ne $results -and
                 $results -is [System.Data.DataSet] -and
-                $results.Tables.Count -gt 1
-            ) {
-                foreach ($detail in $results.Tables[1].Rows) {
+                $results.Tables.Count -gt 1) {
 
+                foreach ($detail in $results.Tables[1].Rows) {
                     $safeDatabaseName = if ([string]::IsNullOrWhiteSpace([string]$detail.DatabaseName)) { "(unknown)" } else { [string]$detail.DatabaseName }
                     $safeRankingCategory = if ([string]::IsNullOrWhiteSpace([string]$detail.RankingCategory)) { "(unknown)" } else { [string]$detail.RankingCategory }
                     $safeSqlText = if ([string]::IsNullOrWhiteSpace([string]$detail.SqlText)) { "(unavailable)" } else { [string]$detail.SqlText }
@@ -471,6 +456,7 @@ SQL text: $safeSqlText
 "@
 
                     $safeDetails = $detailText.Replace("'", "''")
+                    $safeDatabaseForSql = $safeDatabaseName.Replace("'", "''")
 
                     Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
@@ -479,29 +465,14 @@ SQL text: $safeSqlText
                         -Query @"
 INSERT INTO dbo.MetricTextSnapshot
 (
-    InstanceId,
-    CaptureTime,
-    DatabaseName,
-    MetricCategory,
-    DetailType,
-    Severity,
-    NumericValue1,
-    NumericValue2,
-    Details,
-    SourceCollector
+    InstanceId, CaptureTime, DatabaseName, MetricCategory, DetailType,
+    Severity, NumericValue1, NumericValue2, Details, SourceCollector
 )
 VALUES
 (
-    $InstanceId,
-    '$captureTime',
-    N'$($safeDatabaseName.Replace("'", "''"))',
-    'QueryStats',
-    'QueryStatsDetail',
-    'Info',
-    $([decimal]$detail.AvgCpuMs),
-    $([decimal]$detail.AvgElapsedMs),
-    N'$safeDetails',
-    '$CollectorName'
+    $InstanceId, '$captureTime', N'$safeDatabaseForSql', 'QueryStats',
+    'QueryStatsDetail', 'Info', $([decimal]$detail.AvgCpuMs),
+    $([decimal]$detail.AvgElapsedMs), N'$safeDetails', '$CollectorName'
 );
 "@ `
                         -QueryTimeout $QueryTimeout | Out-Null
