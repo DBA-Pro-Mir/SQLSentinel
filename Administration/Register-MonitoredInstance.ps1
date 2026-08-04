@@ -2,6 +2,8 @@
 ===============================================================================
  SQLSentinel - Register Monitored Instance
 ===============================================================================
+ Validates a SQL Server instance and inserts or updates its inventory record in
+ dbo.MonitoredInstances, including backup compliance and platform metadata.
 #>
 
 [CmdletBinding()]
@@ -51,6 +53,7 @@ try {
     $CentralDatabase = [string]$config.CentralDatabase
 
     $SqlCredential = $null
+
     if ($null -ne $config.SqlCredential -and
         $config.SqlCredential.Username -and
         $config.SqlCredential.Password) {
@@ -97,6 +100,7 @@ FROM sys.dm_os_sys_info AS osi;
         -EnableException
 
     $server = $serverInfo | Select-Object -First 1
+
     if ($null -eq $server) {
         throw "Connectivity validation returned no server information."
     }
@@ -147,6 +151,8 @@ FROM sys.dm_os_sys_info AS osi;
     $safeCollectionProfile = $CollectionProfile.Replace("'", "''")
     $safeComplianceProfile = $ComplianceProfile.Replace("'", "''")
     $safeNotes = $Notes.Replace("'", "''")
+    $safeSqlVersion = ([string]$server.ProductVersion).Replace("'", "''")
+    $safeEdition = ([string]$server.Edition).Replace("'", "''")
 
     Write-Info "Registering instance in SQLMonitoring"
 
@@ -158,9 +164,16 @@ FROM sys.dm_os_sys_info AS osi;
 SET NOCOUNT ON;
 
 IF COL_LENGTH('dbo.MonitoredInstances', 'ComplianceProfile') IS NULL
-BEGIN
-    THROW 50001, 'Column dbo.MonitoredInstances.ComplianceProfile does not exist. Apply the backup compliance schema update first.', 1;
-END;
+    THROW 50001, 'Column dbo.MonitoredInstances.ComplianceProfile does not exist.', 1;
+
+IF COL_LENGTH('dbo.MonitoredInstances', 'ModifiedAt') IS NULL
+    THROW 50002, 'Column dbo.MonitoredInstances.ModifiedAt does not exist.', 1;
+
+IF COL_LENGTH('dbo.MonitoredInstances', 'SqlVersion') IS NULL
+    THROW 50003, 'Column dbo.MonitoredInstances.SqlVersion does not exist.', 1;
+
+IF COL_LENGTH('dbo.MonitoredInstances', 'Edition') IS NULL
+    THROW 50004, 'Column dbo.MonitoredInstances.Edition does not exist.', 1;
 
 IF EXISTS
 (
@@ -175,8 +188,10 @@ BEGIN
         IsEnabled = 1,
         CollectionProfile = N'$safeCollectionProfile',
         ComplianceProfile = N'$safeComplianceProfile',
+        SqlVersion = N'$safeSqlVersion',
+        Edition = N'$safeEdition',
         Notes = N'$safeNotes',
-        UpdatedAt = SYSDATETIME()
+        ModifiedAt = SYSDATETIME()
     WHERE InstanceName = N'$safeInstanceName';
 END
 ELSE
@@ -188,8 +203,11 @@ BEGIN
         IsEnabled,
         CollectionProfile,
         ComplianceProfile,
+        SqlVersion,
+        Edition,
         Notes,
-        CreatedAt
+        CreatedAt,
+        ModifiedAt
     )
     VALUES
     (
@@ -198,7 +216,10 @@ BEGIN
         1,
         N'$safeCollectionProfile',
         N'$safeComplianceProfile',
+        N'$safeSqlVersion',
+        N'$safeEdition',
         N'$safeNotes',
+        SYSDATETIME(),
         SYSDATETIME()
     );
 END;
@@ -209,10 +230,12 @@ SELECT
     EnvironmentName,
     CollectionProfile,
     ComplianceProfile,
+    SqlVersion,
+    Edition,
     IsEnabled,
     Notes,
     CreatedAt,
-    UpdatedAt
+    ModifiedAt
 FROM dbo.MonitoredInstances
 WHERE InstanceName = N'$safeInstanceName';
 "@ `
