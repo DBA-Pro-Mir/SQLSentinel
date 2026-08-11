@@ -1,93 +1,149 @@
 # SQLSentinel
 
-Enterprise SQL Server monitoring and observability platform built with PowerShell, dbatools, and SQL Server for historical performance analysis, anomaly detection, and incident correlation.
----
+SQLSentinel is a SQL Server monitoring and observability platform built with PowerShell, dbatools, and SQL Server. It collects operational, performance, backup, query, blocking, connection, and SQL Agent data into a central repository for historical analysis, incident investigation, reporting, and future health scoring.
 
-# Configuration
+## Project Structure
+
+```text
+SQLSentinel/
+├── Administration/
+├── Collectors/
+├── Config/
+├── Database/
+├── Docs/
+├── Reports/
+└── Samples/
+```
+
+## Configuration
 
 SQLSentinel uses a local runtime configuration file:
 
-```plaintext
+```text
 Config/SQLSentinel.config.json
 ```
 
 A GitHub-safe template is provided:
 
-```plaintext
+```text
 Config/SQLSentinel.config.template.json
 ```
 
-The runtime config may contain credentials and environment-specific settings, so it should not be committed to GitHub.
+The runtime configuration may contain credentials and environment-specific settings and should not be committed to GitHub.
 
-Collectors currently support SQL Authentication for prototype testing and pass credentials to dbatools using `-SqlCredential`.
+## Administration
 
----
+Routine instance operations are performed through the scripts in `Administration/`.
 
-# Current Prototype Status
+| Script | Purpose |
+| --- | --- |
+| `Register-MonitoredInstance.ps1` | Register a new monitored SQL Server or refresh an existing registration |
+| `Get-MonitoredInstances.ps1` | List all, enabled, or disabled monitored instances |
+| `Set-MonitoredInstanceState.ps1` | Enable or disable monitoring while preserving historical data |
 
-Current working prototype features:
+### Register an instance
 
-- Central monitoring repository
-- Multi-server monitoring
-- Generic metric ingestion
-- Historical metric storage
-- Performance counter collection
-- Collection execution logging
-- SQL authentication support
-- dbatools-based connectivity
+SIMPLE backup compliance example:
 
-Current working collectors:
-
-```plaintext
-Collectors/Collect-PerformanceCounters.ps1
-Collectors/Collect-Connections.ps1
+```powershell
+.\Administration\Register-MonitoredInstance.ps1 `
+    -SqlInstance "EC-PRD-SQL-35" `
+    -EnvironmentName "PROD" `
+    -CollectionProfile "Standard" `
+    -ComplianceProfile "V1_SIMPLE" `
+    -Notes "Production SQL Server"
 ```
 
-Currently monitored metrics include:
+FULL backup compliance example:
 
-- Batch Requests/sec
-- User Connections
-- Logins/sec
-- Logouts/sec
-- Transactions/sec
-- Lock Waits/sec
-- Deadlocks/sec
-- SQL Compilations/sec
-- SQL Re-Compilations/sec
-- Memory metrics
-- Buffer metrics
-- Page life expectancy
-- TotalUserSessions
-- DistinctLogins
-- DistinctHosts
-- DistinctApplications
-- Sessions by login
-- Sessions by host
-- Sessions by application
-- Sessions by database
+```powershell
+.\Administration\Register-MonitoredInstance.ps1 `
+    -SqlInstance "SERVERNAME" `
+    -EnvironmentName "PROD" `
+    -CollectionProfile "Standard" `
+    -ComplianceProfile "V2_FULL" `
+    -Notes "Production SQL Server"
+```
 
-Connection breakdown metrics use TOP row limits and minimum session thresholds to reduce excessive metric cardinality.
+Registration validates connectivity and required monitoring access, captures SQL version and edition, and maintains `CreatedAt` and `ModifiedAt` in `dbo.MonitoredInstances`.
 
----
+### Disable monitoring
 
-# Current Tested Environment
+```powershell
+.\Administration\Set-MonitoredInstanceState.ps1 `
+    -SqlInstance "EC-PRD-SQL-35" `
+    -State Disable `
+    -Reason "Maintenance window"
+```
 
-Validated prototype environment:
+### Re-enable monitoring
 
-| Component | Status |
-| :--- | :--- |
-| Local repository database | Working |
-| Multi-server collection | Working |
-| Remote SQL collection | Working |
-| SQL Authentication | Working |
-| dbatools connectivity | Working |
-| Historical metric ingestion | Working |
+```powershell
+.\Administration\Set-MonitoredInstanceState.ps1 `
+    -SqlInstance "EC-PRD-SQL-35" `
+    -State Enable `
+    -Reason "Maintenance completed"
+```
 
+### List instances
 
-# Current Working Collectors
+```powershell
+.\Administration\Get-MonitoredInstances.ps1
+.\Administration\Get-MonitoredInstances.ps1 -Status Enabled
+.\Administration\Get-MonitoredInstances.ps1 -Status Disabled
+```
 
-| Collector | Purpose | Storage |
-| :--- | :--- | :--- |
-| Collect-PerformanceCounters.ps1 | SQL Server performance counters and throughput metrics | dbo.MetricSnapshot |
-| Collect-Connections.ps1 | Connection/session summary and breakdown metrics | dbo.MetricSnapshot |
-| Collect-ActiveRequests.ps1 | Threshold-based capture of expensive currently running requests | dbo.MetricSnapshot, dbo.MetricTextSnapshot |
+## Backup Compliance Profiles
+
+SQLSentinel uses an explicit compliance profile per monitored instance so backup reporting reflects the intended operational policy.
+
+| Profile | Intended Policy |
+| --- | --- |
+| `V1_SIMPLE` | SIMPLE recovery policy; full backup compliance without transaction log backup requirement |
+| `V2_FULL` | FULL recovery policy; full and transaction log backup compliance, with differential checks according to collector configuration |
+
+## Current Collectors
+
+Current collectors include:
+
+- Performance Counters
+- Connections
+- Active Requests
+- Blocking
+- Backups
+- Database I/O
+- Query Stats V2
+- Wait Stats
+- SQL Agent jobs and alerts where configured
+
+QueryStats V2 uses a bounded candidate model to collect top CPU, duration, logical-read, and execution-count queries without applying expensive SQL text and plan attribute functions to the entire plan cache.
+
+## Documentation
+
+### Operations
+
+- [Instance Management Runbook](Docs/Operations/InstanceManagement.md)
+- [Monitored Instance Registration](Docs/Operations/Registration.md)
+
+### Architecture
+
+- [QueryStats Collector V2](docs/architecture/QueryStatsCollector.md)
+
+## Repository Operations
+
+Before performing administration tasks, synchronize the local repository:
+
+```powershell
+git status
+git pull origin main
+```
+
+Routine operational changes should use the administration scripts instead of ad-hoc updates to `dbo.MonitoredInstances`.
+
+## Operational Principles
+
+- Preserve historical data when disabling or retiring an instance.
+- Assign the correct backup compliance profile during registration.
+- Validate representative collectors after adding or re-enabling an instance.
+- Review `dbo.CollectionRunHistory` when troubleshooting collector failures or timeouts.
+- Keep collector workloads bounded and lightweight, especially on SQL Server instances with thousands of databases.
