@@ -5,24 +5,70 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name=N'rpt') EXEC(N'CREATE SCHEMA
 GO
 
 CREATE OR ALTER VIEW rpt.vw_PerformanceHealthCurrent AS
-WITH L AS (
- SELECT ms.*, ROW_NUMBER() OVER(PARTITION BY ms.InstanceId,ms.CounterName ORDER BY ms.CaptureTime DESC) rn
- FROM dbo.MetricSnapshot ms
- WHERE ms.SourceCollector=N'Collect-PerformanceCounters'
-   AND ms.CounterName IN (N'Memory Grants Pending',N'Target Server Memory (KB)',N'Total Server Memory (KB)',N'Page life expectancy',N'Number of Deadlocks/sec')
-), P AS (
- SELECT InstanceId, MAX(CaptureTime) CaptureTime,
-  MAX(CASE WHEN CounterName=N'Memory Grants Pending' THEN MetricValue END) MemoryGrantsPending,
-  MAX(CASE WHEN CounterName=N'Target Server Memory (KB)' THEN MetricValue END) TargetServerMemoryKB,
-  MAX(CASE WHEN CounterName=N'Total Server Memory (KB)' THEN MetricValue END) TotalServerMemoryKB,
-  MAX(CASE WHEN CounterName=N'Page life expectancy' THEN MetricValue END) PageLifeExpectancySeconds,
-  MAX(CASE WHEN CounterName=N'Number of Deadlocks/sec' THEN MetricValue END) DeadlockCounter
- FROM L WHERE rn=1 GROUP BY InstanceId
+WITH Ranked AS
+(
+    SELECT
+        ms.InstanceId,ms.CaptureTime,ms.CounterName,ms.MetricValue,
+        rn=ROW_NUMBER() OVER(PARTITION BY ms.InstanceId,ms.CounterName ORDER BY ms.CaptureTime DESC),
+        PreviousMetricValue=LAG(ms.MetricValue) OVER(PARTITION BY ms.InstanceId,ms.CounterName ORDER BY ms.CaptureTime)
+    FROM dbo.MetricSnapshot ms
+    WHERE ms.SourceCollector=N'Collect-PerformanceCounters'
+      AND ms.CounterName IN
+      (
+        N'Memory Grants Pending',N'Target Server Memory (KB)',N'Total Server Memory (KB)',
+        N'Page life expectancy',N'Number of Deadlocks/sec',N'SqlProcessCpuPercent',
+        N'SystemCpuPercent',N'SystemIdlePercent'
+      )
+), P AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) CaptureTime,
+        MAX(CASE WHEN CounterName=N'Memory Grants Pending' AND rn=1 THEN MetricValue END) MemoryGrantsPending,
+        MAX(CASE WHEN CounterName=N'Target Server Memory (KB)' AND rn=1 THEN MetricValue END) TargetServerMemoryKB,
+        MAX(CASE WHEN CounterName=N'Total Server Memory (KB)' AND rn=1 THEN MetricValue END) TotalServerMemoryKB,
+        MAX(CASE WHEN CounterName=N'Page life expectancy' AND rn=1 THEN MetricValue END) PageLifeExpectancySeconds,
+        MAX(CASE WHEN CounterName=N'Number of Deadlocks/sec' AND rn=1 THEN MetricValue END) DeadlockCounter,
+        MAX(CASE WHEN CounterName=N'Number of Deadlocks/sec' AND rn=1 THEN PreviousMetricValue END) PreviousDeadlockCounter,
+        MAX(CASE WHEN CounterName=N'SqlProcessCpuPercent' AND rn=1 THEN MetricValue END) SqlProcessCpuPercent,
+        MAX(CASE WHEN CounterName=N'SystemCpuPercent' AND rn=1 THEN MetricValue END) SystemCpuPercent,
+        MAX(CASE WHEN CounterName=N'SystemIdlePercent' AND rn=1 THEN MetricValue END) SystemIdlePercent
+    FROM Ranked
+    GROUP BY InstanceId
 )
-SELECT mi.InstanceId,mi.InstanceName,mi.EnvironmentName,p.CaptureTime,p.MemoryGrantsPending,p.TargetServerMemoryKB,p.TotalServerMemoryKB,p.PageLifeExpectancySeconds,p.DeadlockCounter,
- MemoryHealth=CASE WHEN p.InstanceId IS NULL THEN N'Unknown' WHEN ISNULL(p.MemoryGrantsPending,0)>0 THEN N'Warning' WHEN p.TargetServerMemoryKB>0 AND p.TotalServerMemoryKB < p.TargetServerMemoryKB*0.90 THEN N'Warning' ELSE N'Healthy' END,
- DeadlockHealth=CASE WHEN p.InstanceId IS NULL THEN N'Unknown' WHEN ISNULL(p.DeadlockCounter,0)>0 THEN N'Warning' ELSE N'Healthy' END
-FROM dbo.MonitoredInstances mi LEFT JOIN P p ON p.InstanceId=mi.InstanceId WHERE mi.IsEnabled=1;
+SELECT
+    mi.InstanceId,mi.InstanceName,mi.EnvironmentName,p.CaptureTime,
+    p.SqlProcessCpuPercent,p.SystemCpuPercent,p.SystemIdlePercent,
+    p.MemoryGrantsPending,p.TargetServerMemoryKB,p.TotalServerMemoryKB,p.PageLifeExpectancySeconds,
+    p.DeadlockCounter,
+    DeadlocksSincePreviousSample=CASE
+        WHEN p.DeadlockCounter IS NULL OR p.PreviousDeadlockCounter IS NULL THEN NULL
+        WHEN p.DeadlockCounter < p.PreviousDeadlockCounter THEN NULL
+        ELSE p.DeadlockCounter-p.PreviousDeadlockCounter
+    END,
+    CpuHealth=CASE
+        WHEN p.InstanceId IS NULL OR p.SystemCpuPercent IS NULL THEN N'Unknown'
+        WHEN p.SystemCpuPercent>=90 OR p.SqlProcessCpuPercent>=85 THEN N'Critical'
+        WHEN p.SystemCpuPercent>=80 OR p.SqlProcessCpuPercent>=70 THEN N'Warning'
+        ELSE N'Healthy'
+    END,
+    MemoryHealth=CASE
+        WHEN p.InstanceId IS NULL THEN N'Unknown'
+        WHEN ISNULL(p.MemoryGrantsPending,0)>=5 THEN N'Critical'
+        WHEN ISNULL(p.MemoryGrantsPending,0)>0 THEN N'Warning'
+        ELSE N'Healthy'
+    END,
+    DeadlockHealth=CASE
+        WHEN p.InstanceId IS NULL OR p.DeadlockCounter IS NULL THEN N'Unknown'
+        WHEN p.PreviousDeadlockCounter IS NULL THEN N'Unknown'
+        WHEN p.DeadlockCounter<p.PreviousDeadlockCounter THEN N'Unknown'
+        WHEN p.DeadlockCounter-p.PreviousDeadlockCounter>=5 THEN N'Critical'
+        WHEN p.DeadlockCounter-p.PreviousDeadlockCounter>0 THEN N'Warning'
+        ELSE N'Healthy'
+    END
+FROM dbo.MonitoredInstances mi
+LEFT JOIN P p ON p.InstanceId=mi.InstanceId
+WHERE mi.IsEnabled=1;
 GO
 
 CREATE OR ALTER VIEW rpt.vw_BlockingHealthCurrent AS
