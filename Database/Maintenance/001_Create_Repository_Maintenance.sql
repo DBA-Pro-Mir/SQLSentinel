@@ -12,10 +12,39 @@
  Deletes are intentionally batched to limit transaction log growth, blocking,
  and long-running cleanup transactions. Retention can be tightened later when
  collector frequency increases.
+
+ Retention indexes:
+   MetricSnapshot already has IX_MetricSnapshot_CaptureTime.
+   CollectionRunHistory already has IX_CollectionRunHistory_StartedAt.
+   MetricTextSnapshot requires IX_MetricTextSnapshot_CaptureTime and this
+   deployment creates it if it does not already exist.
 ===============================================================================
 */
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'rpt')
+    EXEC(N'CREATE SCHEMA rpt AUTHORIZATION dbo;');
+GO
+
+/*
+ The cleanup predicate for MetricTextSnapshot is CaptureTime < @TextCutoff.
+ A CaptureTime-leading index prevents the weekly purge from having to scan the
+ text table as it grows. This index was initially validated manually and is now
+ part of the repeatable repository deployment.
+*/
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.indexes
+    WHERE object_id = OBJECT_ID(N'dbo.MetricTextSnapshot')
+      AND name = N'IX_MetricTextSnapshot_CaptureTime'
+)
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_MetricTextSnapshot_CaptureTime
+        ON dbo.MetricTextSnapshot (CaptureTime);
+END;
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_SQLSentinel_RepositoryCleanup
@@ -120,5 +149,5 @@ SELECT
 FROM sys.database_files AS df;
 GO
 
-PRINT 'SQLSentinel repository maintenance objects created/updated successfully.';
+PRINT 'SQLSentinel repository maintenance objects and retention indexes created/updated successfully.';
 GO
