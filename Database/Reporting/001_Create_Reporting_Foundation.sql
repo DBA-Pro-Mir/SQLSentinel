@@ -98,15 +98,41 @@ WITH LatestCapture AS
     GROUP BY ms.InstanceId, ms.CaptureTime
 )
 SELECT
-    mi.InstanceId, mi.InstanceName, mi.EnvironmentName, mi.ComplianceProfile,
-    bs.CaptureTime, bs.DatabaseCount, bs.DatabasesWithoutFullBackup,
-    bs.DatabasesWithOldFullBackup, bs.DatabasesWithOldDiffBackup,
-    bs.RecoveryModelViolations, bs.DatabasesWithoutRequiredLogBackup,
-    bs.DatabasesWithOldRequiredLogBackup, bs.NonCompliantDatabaseCount,
-    bs.MaxFullBackupAgeHours, bs.MaxLogBackupAgeHours,
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    mi.ComplianceProfile,
+    bs.CaptureTime,
+    bs.DatabaseCount,
+    bs.DatabasesWithoutFullBackup,
+    bs.DatabasesWithOldFullBackup,
+    bs.DatabasesWithOldDiffBackup,
+    bs.RecoveryModelViolations,
+    bs.DatabasesWithoutRequiredLogBackup,
+    bs.DatabasesWithOldRequiredLogBackup,
+    bs.NonCompliantDatabaseCount,
+    bs.MaxFullBackupAgeHours,
+    bs.MaxLogBackupAgeHours,
+    BackupProtectionIssueCount =
+        ISNULL(bs.DatabasesWithoutFullBackup,0)
+      + ISNULL(bs.DatabasesWithOldFullBackup,0)
+      + ISNULL(bs.DatabasesWithOldDiffBackup,0)
+      + ISNULL(bs.DatabasesWithoutRequiredLogBackup,0)
+      + ISNULL(bs.DatabasesWithOldRequiredLogBackup,0),
+    ConfigurationViolationCount = ISNULL(bs.RecoveryModelViolations,0),
     BackupHealth = CASE
         WHEN bs.InstanceId IS NULL THEN N'Unknown'
-        WHEN ISNULL(bs.NonCompliantDatabaseCount,0) > 0 THEN N'Critical'
+        WHEN ISNULL(bs.DatabasesWithoutFullBackup,0) > 0
+          OR ISNULL(bs.DatabasesWithOldFullBackup,0) > 0
+          OR ISNULL(bs.DatabasesWithOldDiffBackup,0) > 0
+          OR ISNULL(bs.DatabasesWithoutRequiredLogBackup,0) > 0
+          OR ISNULL(bs.DatabasesWithOldRequiredLogBackup,0) > 0
+            THEN N'Critical'
+        ELSE N'Healthy'
+    END,
+    ConfigurationHealth = CASE
+        WHEN bs.InstanceId IS NULL THEN N'Unknown'
+        WHEN ISNULL(bs.RecoveryModelViolations,0) > 0 THEN N'Warning'
         ELSE N'Healthy'
     END
 FROM dbo.MonitoredInstances AS mi
@@ -160,17 +186,29 @@ WITH CollectorSummary AS
     GROUP BY ch.InstanceId
 )
 SELECT
-    mi.InstanceId, mi.InstanceName, mi.EnvironmentName,
-    mi.CollectionProfile, mi.ComplianceProfile, mi.SqlVersion, mi.Edition,
-    bc.CaptureTime AS BackupCaptureTime, bc.DatabaseCount,
-    bc.NonCompliantDatabaseCount, bc.BackupHealth, cs.LastCollectionTime,
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    mi.CollectionProfile,
+    mi.ComplianceProfile,
+    mi.SqlVersion,
+    mi.Edition,
+    bc.CaptureTime AS BackupCaptureTime,
+    bc.DatabaseCount,
+    bc.BackupProtectionIssueCount,
+    bc.ConfigurationViolationCount,
+    bc.NonCompliantDatabaseCount,
+    bc.BackupHealth,
+    bc.ConfigurationHealth,
+    cs.LastCollectionTime,
     ISNULL(cs.CollectorCriticalCount,0) AS CollectorCriticalCount,
     ISNULL(cs.CollectorWarningCount,0) AS CollectorWarningCount,
     OverallHealth = CASE
         WHEN ISNULL(cs.CollectorCriticalCount,0) > 0 THEN N'Critical'
         WHEN bc.BackupHealth = N'Critical' THEN N'Critical'
         WHEN ISNULL(cs.CollectorWarningCount,0) > 0 THEN N'Warning'
-        WHEN bc.BackupHealth = N'Unknown' THEN N'Warning'
+        WHEN bc.ConfigurationHealth = N'Warning' THEN N'Warning'
+        WHEN bc.BackupHealth = N'Unknown' OR bc.ConfigurationHealth = N'Unknown' THEN N'Warning'
         ELSE N'Healthy'
     END
 FROM dbo.MonitoredInstances AS mi
