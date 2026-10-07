@@ -1396,7 +1396,7 @@ SELECT
     CONCAT
     (
         N'Deadlocks detected - ',
-        CONVERT(varchar(30),s.DeadlocksSincePreviousSample)
+        CONVERT(varchar(30),CONVERT(bigint,s.DeadlocksSincePreviousSample))
     ),
     s.PerformanceCaptureTime,
     CONVERT(decimal(19,2),s.DeadlocksSincePreviousSample),
@@ -1404,7 +1404,7 @@ SELECT
     CONCAT
     (
         N'Deadlocks since previous sample: ',
-        CONVERT(varchar(30),s.DeadlocksSincePreviousSample)
+        CONVERT(varchar(30),CONVERT(bigint,s.DeadlocksSincePreviousSample))
     )
 FROM rpt.vw_ServerHealthScorecard AS s
 WHERE s.DeadlockHealth IN(N'Warning',N'Critical')
