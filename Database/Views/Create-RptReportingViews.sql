@@ -22,9 +22,10 @@ GO
   10 vw_QueryPressureCurrent
   11 vw_SQLAgentHealthCurrent
   12 vw_WaitPressureCurrent
-  13 vw_ServerHealthCurrent
-  14 vw_ServerHealthScorecard
-  15 vw_ActiveOperationalIssues
+  13 vw_WorkerThreadHealthCurrent
+  14 vw_ServerHealthCurrent
+  15 vw_ServerHealthScorecard
+  16 vw_ActiveOperationalIssues
 =============================================================================*/
 
 /*=============================================================================
@@ -963,7 +964,94 @@ WHERE mi.IsEnabled=1;
 GO
 
 /*=============================================================================
-  13. Server Health Current
+  13. Worker Thread Health Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_WorkerThreadHealthCurrent
+AS
+WITH L AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime,
+        ms.CounterName,
+        ms.MetricValue,
+        rn = ROW_NUMBER() OVER
+        (
+            PARTITION BY ms.InstanceId, ms.CounterName
+            ORDER BY ms.CaptureTime DESC, ms.MetricSnapshotId DESC
+        )
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-PerformanceCounters'
+      AND ms.MetricCategory = N'Scheduler'
+      AND ms.ObjectName = N'WorkerThreads'
+      AND ms.CounterName IN
+      (
+          N'MaxWorkerThreads',
+          N'CurrentWorkerThreads',
+          N'ActiveWorkerThreads',
+          N'RunnableTasks',
+          N'WorkQueueCount',
+          N'WorkerThreadUtilizationPercent'
+      )
+),
+W AS
+(
+    SELECT
+        InstanceId,
+        CaptureTime = MAX(CASE WHEN rn = 1 THEN CaptureTime END),
+        MaxWorkerThreads =
+            MAX(CASE WHEN CounterName = N'MaxWorkerThreads' AND rn = 1
+                     THEN MetricValue END),
+        CurrentWorkerThreads =
+            MAX(CASE WHEN CounterName = N'CurrentWorkerThreads' AND rn = 1
+                     THEN MetricValue END),
+        ActiveWorkerThreads =
+            MAX(CASE WHEN CounterName = N'ActiveWorkerThreads' AND rn = 1
+                     THEN MetricValue END),
+        RunnableTasks =
+            MAX(CASE WHEN CounterName = N'RunnableTasks' AND rn = 1
+                     THEN MetricValue END),
+        WorkQueueCount =
+            MAX(CASE WHEN CounterName = N'WorkQueueCount' AND rn = 1
+                     THEN MetricValue END),
+        WorkerThreadUtilizationPercent =
+            MAX(CASE WHEN CounterName = N'WorkerThreadUtilizationPercent' AND rn = 1
+                     THEN MetricValue END)
+    FROM L
+    WHERE rn = 1
+    GROUP BY InstanceId
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    w.CaptureTime,
+    w.MaxWorkerThreads,
+    w.CurrentWorkerThreads,
+    w.ActiveWorkerThreads,
+    w.RunnableTasks,
+    w.WorkQueueCount,
+    w.WorkerThreadUtilizationPercent,
+    WorkerHealth =
+        CASE
+            WHEN w.InstanceId IS NULL
+              OR w.WorkerThreadUtilizationPercent IS NULL
+                THEN N'Unknown'
+            WHEN ISNULL(w.WorkQueueCount, 0) > 0
+              OR w.WorkerThreadUtilizationPercent >= 90
+                THEN N'Critical'
+            WHEN w.WorkerThreadUtilizationPercent >= 80
+                THEN N'Warning'
+            ELSE N'Healthy'
+        END
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN W AS w
+    ON w.InstanceId = mi.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  14. Server Health Current
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_ServerHealthCurrent
 AS
@@ -1017,7 +1105,7 @@ WHERE mi.IsEnabled = 1;
 GO
 
 /*=============================================================================
-  14. Server Health Scorecard
+  15. Server Health Scorecard
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_ServerHealthScorecard
 AS
@@ -1056,6 +1144,15 @@ Base AS
         ph.MemoryHealth,
         ph.DeadlockHealth,
 
+        wh.CaptureTime AS WorkerCaptureTime,
+        wh.MaxWorkerThreads,
+        wh.CurrentWorkerThreads,
+        wh.ActiveWorkerThreads,
+        wh.WorkerThreadUtilizationPercent,
+        wh.RunnableTasks,
+        wh.WorkQueueCount,
+        wh.WorkerHealth,
+
         bh.CaptureTime AS BlockingCaptureTime,
         bh.BlockedSessionCount,
         bh.DistinctBlockingSessionCount,
@@ -1086,6 +1183,8 @@ Base AS
     FROM dbo.MonitoredInstances AS mi
     LEFT JOIN rpt.vw_PerformanceHealthCurrent AS ph
         ON ph.InstanceId = mi.InstanceId
+    LEFT JOIN rpt.vw_WorkerThreadHealthCurrent AS wh
+        ON wh.InstanceId = mi.InstanceId
     LEFT JOIN rpt.vw_BlockingHealthCurrent AS bh
         ON bh.InstanceId = mi.InstanceId
     LEFT JOIN rpt.vw_BackupComplianceCurrent AS bc
@@ -1126,6 +1225,11 @@ Scores AS
                   WHEN N'Warning'  THEN 8
                   ELSE 0
               END
+            + CASE b.WorkerHealth
+                  WHEN N'Critical' THEN 20
+                  WHEN N'Warning'  THEN 10
+                  ELSE 0
+              END
             + CASE b.FreshnessHealth
                   WHEN N'Critical' THEN 25
                   WHEN N'Warning'  THEN 15
@@ -1160,6 +1264,11 @@ Scores AS
             + CASE b.DeadlockHealth
                   WHEN N'Critical' THEN 15
                   WHEN N'Warning'  THEN 8
+                  ELSE 0
+              END
+            + CASE b.WorkerHealth
+                  WHEN N'Critical' THEN 20
+                  WHEN N'Warning'  THEN 10
                   ELSE 0
               END
             + CASE b.BackupHealth
@@ -1206,6 +1315,15 @@ SELECT
     s.MemoryHealth,
     s.DeadlockHealth,
 
+    s.WorkerCaptureTime,
+    s.MaxWorkerThreads,
+    s.CurrentWorkerThreads,
+    s.ActiveWorkerThreads,
+    s.WorkerThreadUtilizationPercent,
+    s.RunnableTasks,
+    s.WorkQueueCount,
+    s.WorkerHealth,
+
     s.BlockingCaptureTime,
     s.BlockedSessionCount,
     s.DistinctBlockingSessionCount,
@@ -1251,6 +1369,7 @@ SELECT
             WHEN s.MemoryHealth = N'Critical' THEN N'Critical'
             WHEN s.BlockingHealth = N'Critical' THEN N'Critical'
             WHEN s.DeadlockHealth = N'Critical' THEN N'Critical'
+            WHEN s.WorkerHealth = N'Critical' THEN N'Critical'
             WHEN s.BackupHealth = N'Critical' THEN N'Critical'
 
             WHEN s.CollectorWarningCount > 0 THEN N'Warning'
@@ -1259,6 +1378,7 @@ SELECT
             WHEN s.MemoryHealth IN (N'Warning', N'Unknown') THEN N'Warning'
             WHEN s.BlockingHealth IN (N'Warning', N'Unknown') THEN N'Warning'
             WHEN s.DeadlockHealth = N'Warning' THEN N'Warning'
+            WHEN s.WorkerHealth = N'Warning' THEN N'Warning'
             WHEN s.BackupHealth IN (N'Warning', N'Unknown') THEN N'Warning'
             WHEN s.ConfigurationHealth IN (N'Warning', N'Unknown') THEN N'Warning'
             ELSE N'Healthy'
@@ -1282,6 +1402,7 @@ SELECT
             WHEN s.MemoryHealth = N'Critical' THEN N'Critical'
             WHEN s.BlockingHealth = N'Critical' THEN N'Critical'
             WHEN s.DeadlockHealth = N'Critical' THEN N'Critical'
+            WHEN s.WorkerHealth = N'Critical' THEN N'Critical'
 
             WHEN s.CollectorWarningCount > 0 THEN N'Warning'
             WHEN s.FreshnessHealth IN (N'Warning', N'Unknown') THEN N'Warning'
@@ -1289,6 +1410,7 @@ SELECT
             WHEN s.MemoryHealth IN (N'Warning', N'Unknown') THEN N'Warning'
             WHEN s.BlockingHealth IN (N'Warning', N'Unknown') THEN N'Warning'
             WHEN s.DeadlockHealth = N'Warning' THEN N'Warning'
+            WHEN s.WorkerHealth = N'Warning' THEN N'Warning'
             ELSE N'Healthy'
         END,
 
@@ -1307,7 +1429,7 @@ FROM Scores AS s;
 GO
 
 /*=============================================================================
-  15. Active Operational Issues
+  16. Active Operational Issues
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_ActiveOperationalIssues
 AS
@@ -1408,6 +1530,41 @@ SELECT
     )
 FROM rpt.vw_ServerHealthScorecard AS s
 WHERE s.DeadlockHealth IN(N'Warning',N'Critical')
+
+UNION ALL
+
+SELECT
+    s.InstanceId,
+    s.InstanceName,
+    s.EnvironmentName,
+    N'Worker Threads',
+    s.WorkerHealth,
+    CONCAT
+    (
+        N'Worker thread pressure is ',
+        s.WorkerHealth,
+        N' - ',
+        CONVERT(varchar(30), CONVERT(decimal(10,2), s.WorkerThreadUtilizationPercent)),
+        N'% utilization'
+    ),
+    s.WorkerCaptureTime,
+    CONVERT(decimal(19,2), s.WorkerThreadUtilizationPercent),
+    N'Percent',
+    CONCAT
+    (
+        N'Current workers: ',
+        CONVERT(varchar(30), CONVERT(bigint, s.CurrentWorkerThreads)),
+        N' / Max workers: ',
+        CONVERT(varchar(30), CONVERT(bigint, s.MaxWorkerThreads)),
+        N'; Active workers: ',
+        CONVERT(varchar(30), CONVERT(bigint, s.ActiveWorkerThreads)),
+        N'; Runnable tasks: ',
+        CONVERT(varchar(30), CONVERT(bigint, s.RunnableTasks)),
+        N'; Work queue: ',
+        CONVERT(varchar(30), CONVERT(bigint, s.WorkQueueCount))
+    )
+FROM rpt.vw_ServerHealthScorecard AS s
+WHERE s.WorkerHealth IN(N'Warning',N'Critical')
 
 UNION ALL
 
