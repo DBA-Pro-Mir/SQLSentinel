@@ -160,6 +160,51 @@ VALUES
                 }
             }
 
+            # Capture SQL Server worker-thread and scheduler pressure metrics.
+            # These are point-in-time gauges used to detect worker exhaustion / THREADPOOL risk.
+            $worker = Invoke-DbaQuery -SqlInstance $TargetInstance -SqlCredential $SqlCredential -Database master -Query @"
+SELECT
+    CaptureTime = SYSDATETIME(),
+    MaxWorkerThreads = CONVERT(bigint, osi.max_workers_count),
+    CurrentWorkerThreads = CONVERT(bigint, SUM(os.current_workers_count)),
+    ActiveWorkerThreads = CONVERT(bigint, SUM(os.active_workers_count)),
+    RunnableTasks = CONVERT(bigint, SUM(os.runnable_tasks_count)),
+    WorkQueueCount = CONVERT(bigint, SUM(os.work_queue_count)),
+    WorkerThreadUtilizationPercent =
+        CONVERT
+        (
+            decimal(19,2),
+            SUM(os.current_workers_count) * 100.0
+            / NULLIF(osi.max_workers_count, 0)
+        )
+FROM sys.dm_os_schedulers AS os
+CROSS JOIN sys.dm_os_sys_info AS osi
+WHERE os.status = N'VISIBLE ONLINE'
+GROUP BY osi.max_workers_count;
+"@ -QueryTimeout $QueryTimeout -EnableException | Select-Object -First 1
+
+            if ($null -ne $worker) {
+                $workerCapture = ([datetime]$worker.CaptureTime).ToString("yyyy-MM-dd HH:mm:ss")
+                $workerMetrics = @(
+                    @{ Name="MaxWorkerThreads"; Value=[decimal]$worker.MaxWorkerThreads; Unit="count" },
+                    @{ Name="CurrentWorkerThreads"; Value=[decimal]$worker.CurrentWorkerThreads; Unit="count" },
+                    @{ Name="ActiveWorkerThreads"; Value=[decimal]$worker.ActiveWorkerThreads; Unit="count" },
+                    @{ Name="RunnableTasks"; Value=[decimal]$worker.RunnableTasks; Unit="count" },
+                    @{ Name="WorkQueueCount"; Value=[decimal]$worker.WorkQueueCount; Unit="count" },
+                    @{ Name="WorkerThreadUtilizationPercent"; Value=[decimal]$worker.WorkerThreadUtilizationPercent; Unit="percent" }
+                )
+
+                foreach ($metric in $workerMetrics) {
+                    Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -Query @"
+INSERT INTO dbo.MetricSnapshot
+(InstanceId,CaptureTime,DatabaseName,ObjectName,CounterName,InstanceName,MetricCategory,MetricValue,MetricType,Unit,SourceCollector)
+VALUES
+($InstanceId,'$workerCapture',NULL,N'WorkerThreads',N'$($metric.Name)',NULL,'Scheduler',$($metric.Value),'Gauge','$($metric.Unit)','$CollectorName');
+"@ -QueryTimeout 30 | Out-Null
+                    $RowsCollected++
+                }
+            }
+
             Complete-CollectionRun -CentralSqlInstance $CentralSqlInstance -CentralDatabase $CentralDatabase -SqlCredential $SqlCredential -CollectionRunId $CollectionRunId -Status "Success" -RowsCollected $RowsCollected
             Write-Info "Completed $TargetInstance. Rows collected: $RowsCollected"
         }
