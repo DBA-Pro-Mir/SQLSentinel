@@ -130,6 +130,162 @@ INNER JOIN dbo.MonitoredInstances AS mi
 GO
 
 /*=============================================================================
+  03A. Connection Summary Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ConnectionSummaryCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        ms.InstanceId,
+        MAX(ms.CaptureTime) AS CaptureTime
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-Connections'
+      AND ms.MetricCategory = N'Connection'
+      AND ms.ObjectName = N'ConnectionSummary'
+    GROUP BY
+        ms.InstanceId
+),
+S AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime,
+        MAX
+        (
+            CASE
+                WHEN ms.CounterName = N'TotalUserSessions'
+                THEN ms.MetricValue
+            END
+        ) AS TotalUserSessions,
+        MAX
+        (
+            CASE
+                WHEN ms.CounterName = N'DistinctLogins'
+                THEN ms.MetricValue
+            END
+        ) AS DistinctLogins,
+        MAX
+        (
+            CASE
+                WHEN ms.CounterName = N'DistinctHosts'
+                THEN ms.MetricValue
+            END
+        ) AS DistinctHosts,
+        MAX
+        (
+            CASE
+                WHEN ms.CounterName = N'DistinctApplications'
+                THEN ms.MetricValue
+            END
+        ) AS DistinctApplications
+    FROM dbo.MetricSnapshot AS ms
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = ms.InstanceId
+       AND lc.CaptureTime = ms.CaptureTime
+    WHERE ms.SourceCollector = N'Collect-Connections'
+      AND ms.MetricCategory = N'Connection'
+      AND ms.ObjectName = N'ConnectionSummary'
+    GROUP BY
+        ms.InstanceId,
+        ms.CaptureTime
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    s.CaptureTime,
+    s.TotalUserSessions,
+    s.DistinctLogins,
+    s.DistinctHosts,
+    s.DistinctApplications,
+    SessionsPerHost =
+        CONVERT
+        (
+            decimal(19,2),
+            s.TotalUserSessions
+            / NULLIF(s.DistinctHosts,0)
+        ),
+    SessionsPerLogin =
+        CONVERT
+        (
+            decimal(19,2),
+            s.TotalUserSessions
+            / NULLIF(s.DistinctLogins,0)
+        ),
+    SessionsPerApplication =
+        CONVERT
+        (
+            decimal(19,2),
+            s.TotalUserSessions
+            / NULLIF(s.DistinctApplications,0)
+        )
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN S AS s
+    ON s.InstanceId = mi.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  03B. Connection Breakdown Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ConnectionBreakdownCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        ms.InstanceId,
+        MAX(ms.CaptureTime) AS CaptureTime
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-Connections'
+      AND ms.MetricCategory = N'Connection'
+      AND ms.ObjectName = N'ConnectionBreakdown'
+    GROUP BY
+        ms.InstanceId
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    ms.CaptureTime,
+    BreakdownType = ms.CounterName,
+    BreakdownValue = ms.InstanceName,
+    SessionCount = ms.MetricValue
+FROM dbo.MetricSnapshot AS ms
+INNER JOIN LatestCapture AS lc
+    ON lc.InstanceId = ms.InstanceId
+   AND lc.CaptureTime = ms.CaptureTime
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = ms.InstanceId
+WHERE ms.SourceCollector = N'Collect-Connections'
+  AND ms.MetricCategory = N'Connection'
+  AND ms.ObjectName = N'ConnectionBreakdown'
+  AND mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  03C. Connection Trend
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ConnectionTrend
+AS
+SELECT
+    ms.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    ms.CaptureTime,
+    ms.CounterName,
+    ms.MetricValue,
+    ms.Unit
+FROM dbo.MetricSnapshot AS ms
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = ms.InstanceId
+WHERE ms.SourceCollector = N'Collect-Connections'
+  AND ms.MetricCategory = N'Connection'
+  AND ms.ObjectName = N'ConnectionSummary'
+  AND mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
   04. Repository Health
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_RepositoryHealth
