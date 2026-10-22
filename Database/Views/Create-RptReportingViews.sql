@@ -1985,7 +1985,7 @@ Base AS
         mts.InstanceId,
         mts.CaptureTime,
         mts.DatabaseName,
-        mts.Details
+        Details = REPLACE(mts.Details, CHAR(13), N'')
     FROM dbo.MetricTextSnapshot AS mts
     INNER JOIN CleanCaptures AS cc
         ON cc.InstanceId = mts.InstanceId
@@ -2134,7 +2134,7 @@ Base AS
         mts.InstanceId,
         mts.CaptureTime,
         mts.DatabaseName,
-        mts.Details
+        Details = REPLACE(mts.Details, CHAR(13), N'')
     FROM dbo.MetricTextSnapshot AS mts
     INNER JOIN LatestCapture AS lc
         ON lc.InstanceId = mts.InstanceId
