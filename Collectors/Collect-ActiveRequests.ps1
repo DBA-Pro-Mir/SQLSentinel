@@ -248,6 +248,16 @@ SELECT
     LoginName = s.login_name,
     HostName = s.host_name,
     ProgramName = s.program_name,
+    WorkloadClass =
+        CASE
+            WHEN DB_NAME(r.database_id) IN (N'master',N'model',N'msdb',N'tempdb')
+                THEN N'System'
+            WHEN r.command IN (N'BACKUP DATABASE',N'BACKUP LOG',N'RESTORE DATABASE',N'RESTORE LOG')
+              OR ISNULL(s.program_name,N'') LIKE N'DatabaseMail%'
+              OR ISNULL(r.wait_type,N'') = N'BROKER_RECEIVE_WAITFOR'
+                THEN N'Operational'
+            ELSE N'Application'
+        END,
     r.status,
     r.command,
     r.wait_type,
@@ -285,7 +295,8 @@ SELECT
     TotalLogicalReads = ISNULL(SUM(CAST(logical_reads AS bigint)), 0),
     TotalPhysicalReads = ISNULL(SUM(CAST(reads AS bigint)), 0),
     TotalWrites = ISNULL(SUM(CAST(writes AS bigint)), 0)
-FROM #ActiveRequests;
+FROM #ActiveRequests
+WHERE WorkloadClass = N'Application';
 
 SELECT TOP ($MaximumRequests)
     DetailType = 'ActiveRequestDetail',
@@ -294,6 +305,7 @@ SELECT TOP ($MaximumRequests)
     LoginName,
     HostName,
     ProgramName,
+    WorkloadClass,
     status,
     command,
     wait_type,
@@ -337,6 +349,7 @@ SELECT TOP ($MaximumAttributionRows)
     SampleHostName = MAX(HostName),
     SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
+WHERE WorkloadClass = N'Application'
 GROUP BY COALESCE(NULLIF(DatabaseName, ''), '(unknown)')
 ORDER BY
     ISNULL(SUM(CAST(cpu_time AS bigint)), 0) DESC,
@@ -358,6 +371,7 @@ SELECT TOP ($MaximumAttributionRows)
     SampleHostName = MAX(HostName),
     SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
+WHERE WorkloadClass = N'Application'
 GROUP BY COALESCE(NULLIF(HostName, ''), '(unknown)')
 ORDER BY
     ISNULL(SUM(CAST(cpu_time AS bigint)), 0) DESC,
@@ -379,6 +393,7 @@ SELECT TOP ($MaximumAttributionRows)
     SampleHostName = MAX(HostName),
     SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
+WHERE WorkloadClass = N'Application'
 GROUP BY COALESCE(NULLIF(ProgramName, ''), '(unknown)')
 ORDER BY
     ISNULL(SUM(CAST(cpu_time AS bigint)), 0) DESC,
@@ -400,6 +415,7 @@ SELECT TOP ($MaximumAttributionRows)
     SampleHostName = MAX(HostName),
     SampleProgramName = MAX(ProgramName)
 FROM #ActiveRequests
+WHERE WorkloadClass = N'Application'
 GROUP BY COALESCE(NULLIF(LoginName, ''), '(unknown)')
 ORDER BY
     ISNULL(SUM(CAST(cpu_time AS bigint)), 0) DESC,
@@ -421,7 +437,8 @@ SELECT TOP ($MaximumRepeatedQueryRows)
     SampleProgramName = MAX(ProgramName),
     SampleSqlText = MAX(SqlText)
 FROM #ActiveRequests
-WHERE QuerySignature IS NOT NULL
+WHERE WorkloadClass = N'Application'
+  AND QuerySignature IS NOT NULL
 GROUP BY QuerySignature
 HAVING COUNT_BIG(1) > 1
 ORDER BY
@@ -524,6 +541,7 @@ DatabaseName: $safeDatabaseName
 LoginName: $safeLoginName
 HostName: $safeHostName
 ProgramName: $safeProgramName
+WorkloadClass: $($detail.WorkloadClass)
 Status: $safeStatus
 Command: $safeCommand
 WaitType: $safeWaitType
