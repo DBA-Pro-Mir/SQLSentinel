@@ -1844,3 +1844,423 @@ SELECT
 FROM rpt.vw_SQLAgentHealthCurrent AS a
 WHERE ISNULL(a.RecentRetryJobs,0)>0;
 GO
+
+
+/*=============================================================================
+  03D. Active Request Current - classified application workload only
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ActiveRequestCurrent
+AS
+WITH CleanCaptures AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-ActiveRequests'
+      AND ms.MetricCategory = N'ActiveRequest'
+      AND ms.ObjectName = N'ActiveRequestSummary'
+      AND ms.CounterName = N'WorkloadClassificationVersion'
+      AND ms.MetricValue >= 2
+),
+LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM CleanCaptures
+    GROUP BY InstanceId
+),
+S AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime,
+        MAX(CASE WHEN ms.CounterName=N'ActiveRequestCount' THEN ms.MetricValue END) AS ActiveRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'LongRunningRequestCount' THEN ms.MetricValue END) AS LongRunningRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'HighCpuRequestCount' THEN ms.MetricValue END) AS HighCpuRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'HighLogicalReadRequestCount' THEN ms.MetricValue END) AS HighLogicalReadRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'HighPhysicalReadRequestCount' THEN ms.MetricValue END) AS HighPhysicalReadRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'HighWriteRequestCount' THEN ms.MetricValue END) AS HighWriteRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'WaitingRequestCount' THEN ms.MetricValue END) AS WaitingRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'BlockedRequestCount' THEN ms.MetricValue END) AS BlockedRequestCount,
+        MAX(CASE WHEN ms.CounterName=N'MaxElapsedSeconds' THEN ms.MetricValue END) AS MaxElapsedSeconds,
+        MAX(CASE WHEN ms.CounterName=N'TotalCpuMs' THEN ms.MetricValue END) AS TotalCpuMs,
+        MAX(CASE WHEN ms.CounterName=N'TotalLogicalReads' THEN ms.MetricValue END) AS TotalLogicalReads,
+        MAX(CASE WHEN ms.CounterName=N'TotalPhysicalReads' THEN ms.MetricValue END) AS TotalPhysicalReads,
+        MAX(CASE WHEN ms.CounterName=N'TotalWrites' THEN ms.MetricValue END) AS TotalWrites
+    FROM dbo.MetricSnapshot AS ms
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = ms.InstanceId
+       AND lc.CaptureTime = ms.CaptureTime
+    WHERE ms.SourceCollector = N'Collect-ActiveRequests'
+      AND ms.MetricCategory = N'ActiveRequest'
+      AND ms.ObjectName = N'ActiveRequestSummary'
+    GROUP BY
+        ms.InstanceId,
+        ms.CaptureTime
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    s.CaptureTime,
+    s.ActiveRequestCount,
+    s.LongRunningRequestCount,
+    s.HighCpuRequestCount,
+    s.HighLogicalReadRequestCount,
+    s.HighPhysicalReadRequestCount,
+    s.HighWriteRequestCount,
+    s.WaitingRequestCount,
+    s.BlockedRequestCount,
+    s.MaxElapsedSeconds,
+    s.TotalCpuMs,
+    s.TotalLogicalReads,
+    s.TotalPhysicalReads,
+    s.TotalWrites
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN S AS s
+    ON s.InstanceId = mi.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  03E. Active Request Trend - classified application workload only
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ActiveRequestTrend
+AS
+WITH CleanCaptures AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-ActiveRequests'
+      AND ms.MetricCategory = N'ActiveRequest'
+      AND ms.ObjectName = N'ActiveRequestSummary'
+      AND ms.CounterName = N'WorkloadClassificationVersion'
+      AND ms.MetricValue >= 2
+)
+SELECT
+    ms.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    ms.CaptureTime,
+    ms.CounterName,
+    ms.MetricValue,
+    ms.Unit
+FROM dbo.MetricSnapshot AS ms
+INNER JOIN CleanCaptures AS cc
+    ON cc.InstanceId = ms.InstanceId
+   AND cc.CaptureTime = ms.CaptureTime
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = ms.InstanceId
+WHERE ms.SourceCollector = N'Collect-ActiveRequests'
+  AND ms.MetricCategory = N'ActiveRequest'
+  AND ms.ObjectName = N'ActiveRequestSummary'
+  AND ms.CounterName <> N'WorkloadClassificationVersion'
+  AND mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  03F. Query Workload Detail - classified non-system workload only
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_QueryWorkloadDetail
+AS
+WITH CleanCaptures AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-QueryStats'
+      AND ms.MetricCategory = N'QueryStats'
+      AND ms.ObjectName = N'QueryStatsSummary'
+      AND ms.CounterName = N'WorkloadClassificationVersion'
+      AND ms.MetricValue >= 2
+),
+Base AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime,
+        mts.DatabaseName,
+        mts.Details
+    FROM dbo.MetricTextSnapshot AS mts
+    INNER JOIN CleanCaptures AS cc
+        ON cc.InstanceId = mts.InstanceId
+       AND cc.CaptureTime = mts.CaptureTime
+    WHERE mts.SourceCollector = N'Collect-QueryStats'
+      AND mts.MetricCategory = N'QueryStats'
+      AND mts.DetailType = N'QueryStatsDetail'
+),
+Parsed AS
+(
+    SELECT
+        b.InstanceId,
+        b.CaptureTime,
+        b.DatabaseName,
+        RankingCategory = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'RankingCategory: ',b.Details)+17,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'RankingCategory: ',b.Details))
+              -(CHARINDEX(N'RankingCategory: ',b.Details)+17)))),
+        QueryHash = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'QueryHash: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'QueryHash: ',b.Details))
+              -(CHARINDEX(N'QueryHash: ',b.Details)+11)))),
+        QueryPlanHash = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'QueryPlanHash: ',b.Details)+15,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'QueryPlanHash: ',b.Details))
+              -(CHARINDEX(N'QueryPlanHash: ',b.Details)+15)))),
+        ExecutionCount = TRY_CONVERT(bigint,LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'ExecutionCount: ',b.Details)+16,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'ExecutionCount: ',b.Details))
+              -(CHARINDEX(N'ExecutionCount: ',b.Details)+16))))),
+        TotalCpuMs = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'TotalCpuMs: ',b.Details)+12,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'TotalCpuMs: ',b.Details))
+              -(CHARINDEX(N'TotalCpuMs: ',b.Details)+12))))),
+        AvgCpuMs = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'AvgCpuMs: ',b.Details)+10,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AvgCpuMs: ',b.Details))
+              -(CHARINDEX(N'AvgCpuMs: ',b.Details)+10))))),
+        TotalElapsedMs = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'TotalElapsedMs: ',b.Details)+16,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'TotalElapsedMs: ',b.Details))
+              -(CHARINDEX(N'TotalElapsedMs: ',b.Details)+16))))),
+        AvgElapsedMs = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'AvgElapsedMs: ',b.Details)+14,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AvgElapsedMs: ',b.Details))
+              -(CHARINDEX(N'AvgElapsedMs: ',b.Details)+14))))),
+        TotalLogicalReads = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'TotalLogicalReads: ',b.Details)+19,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'TotalLogicalReads: ',b.Details))
+              -(CHARINDEX(N'TotalLogicalReads: ',b.Details)+19))))),
+        AvgLogicalReads = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'AvgLogicalReads: ',b.Details)+17,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AvgLogicalReads: ',b.Details))
+              -(CHARINDEX(N'AvgLogicalReads: ',b.Details)+17))))),
+        TotalPhysicalReads = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'TotalPhysicalReads: ',b.Details)+20,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'TotalPhysicalReads: ',b.Details))
+              -(CHARINDEX(N'TotalPhysicalReads: ',b.Details)+20))))),
+        AvgPhysicalReads = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'AvgPhysicalReads: ',b.Details)+18,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AvgPhysicalReads: ',b.Details))
+              -(CHARINDEX(N'AvgPhysicalReads: ',b.Details)+18))))),
+        TotalWrites = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'TotalWrites: ',b.Details)+13,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'TotalWrites: ',b.Details))
+              -(CHARINDEX(N'TotalWrites: ',b.Details)+13))))),
+        AvgWrites = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'AvgWrites: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AvgWrites: ',b.Details))
+              -(CHARINDEX(N'AvgWrites: ',b.Details)+11))))),
+        SqlText = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'SQL text: ',b.Details)+10,
+            LEN(b.Details))))
+    FROM Base AS b
+    WHERE CHARINDEX(N'RankingCategory: ',b.Details) > 0
+      AND CHARINDEX(N'QueryHash: ',b.Details) > 0
+      AND CHARINDEX(N'QueryPlanHash: ',b.Details) > 0
+      AND CHARINDEX(N'ExecutionCount: ',b.Details) > 0
+      AND CHARINDEX(N'TotalCpuMs: ',b.Details) > 0
+      AND CHARINDEX(N'AvgCpuMs: ',b.Details) > 0
+      AND CHARINDEX(N'TotalElapsedMs: ',b.Details) > 0
+      AND CHARINDEX(N'AvgElapsedMs: ',b.Details) > 0
+      AND CHARINDEX(N'TotalLogicalReads: ',b.Details) > 0
+      AND CHARINDEX(N'AvgLogicalReads: ',b.Details) > 0
+      AND CHARINDEX(N'TotalPhysicalReads: ',b.Details) > 0
+      AND CHARINDEX(N'AvgPhysicalReads: ',b.Details) > 0
+      AND CHARINDEX(N'TotalWrites: ',b.Details) > 0
+      AND CHARINDEX(N'AvgWrites: ',b.Details) > 0
+      AND CHARINDEX(N'SQL text: ',b.Details) > 0
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.DatabaseName,
+    p.RankingCategory,
+    p.QueryHash,
+    p.QueryPlanHash,
+    p.ExecutionCount,
+    p.TotalCpuMs,
+    p.AvgCpuMs,
+    p.TotalElapsedMs,
+    p.AvgElapsedMs,
+    p.TotalLogicalReads,
+    p.AvgLogicalReads,
+    p.TotalPhysicalReads,
+    p.AvgPhysicalReads,
+    p.TotalWrites,
+    p.AvgWrites,
+    p.SqlText
+FROM Parsed AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  03G. Active Workload Detail Current - application workload only
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ActiveWorkloadDetailCurrent
+AS
+WITH CleanCaptures AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-ActiveRequests'
+      AND ms.MetricCategory = N'ActiveRequest'
+      AND ms.ObjectName = N'ActiveRequestSummary'
+      AND ms.CounterName = N'WorkloadClassificationVersion'
+      AND ms.MetricValue >= 2
+),
+LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM CleanCaptures
+    GROUP BY InstanceId
+),
+Base AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime,
+        mts.DatabaseName,
+        mts.Details
+    FROM dbo.MetricTextSnapshot AS mts
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = mts.InstanceId
+       AND lc.CaptureTime = mts.CaptureTime
+    WHERE mts.SourceCollector = N'Collect-ActiveRequests'
+      AND mts.MetricCategory = N'ActiveRequest'
+      AND mts.DetailType = N'ActiveRequestDetail'
+      AND mts.Details LIKE N'%WorkloadClass: Application%'
+),
+Parsed AS
+(
+    SELECT
+        b.InstanceId,
+        b.CaptureTime,
+        b.DatabaseName,
+        SessionId = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'SessionId: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'SessionId: ',b.Details))
+              -(CHARINDEX(N'SessionId: ',b.Details)+11))))),
+        LoginName = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'LoginName: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'LoginName: ',b.Details))
+              -(CHARINDEX(N'LoginName: ',b.Details)+11)))),
+        HostName = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'HostName: ',b.Details)+10,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'HostName: ',b.Details))
+              -(CHARINDEX(N'HostName: ',b.Details)+10)))),
+        ProgramName = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'ProgramName: ',b.Details)+13,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'ProgramName: ',b.Details))
+              -(CHARINDEX(N'ProgramName: ',b.Details)+13)))),
+        Status = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'Status: ',b.Details)+8,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'Status: ',b.Details))
+              -(CHARINDEX(N'Status: ',b.Details)+8)))),
+        Command = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'Command: ',b.Details)+9,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'Command: ',b.Details))
+              -(CHARINDEX(N'Command: ',b.Details)+9)))),
+        WaitType = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'WaitType: ',b.Details)+10,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'WaitType: ',b.Details))
+              -(CHARINDEX(N'WaitType: ',b.Details)+10)))),
+        WaitSeconds = TRY_CONVERT(decimal(19,3),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'WaitSeconds: ',b.Details)+13,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'WaitSeconds: ',b.Details))
+              -(CHARINDEX(N'WaitSeconds: ',b.Details)+13))))),
+        BlockingSessionId = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'BlockingSessionId: ',b.Details)+19,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'BlockingSessionId: ',b.Details))
+              -(CHARINDEX(N'BlockingSessionId: ',b.Details)+19))))),
+        CpuTimeMs = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'CpuTimeMs: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'CpuTimeMs: ',b.Details))
+              -(CHARINDEX(N'CpuTimeMs: ',b.Details)+11))))),
+        ElapsedTimeMs = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'ElapsedTimeMs: ',b.Details)+15,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'ElapsedTimeMs: ',b.Details))
+              -(CHARINDEX(N'ElapsedTimeMs: ',b.Details)+15))))),
+        LogicalReads = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'LogicalReads: ',b.Details)+14,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'LogicalReads: ',b.Details))
+              -(CHARINDEX(N'LogicalReads: ',b.Details)+14))))),
+        Reads = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'Reads: ',b.Details)+7,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'Reads: ',b.Details))
+              -(CHARINDEX(N'Reads: ',b.Details)+7))))),
+        Writes = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'Writes: ',b.Details)+8,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'Writes: ',b.Details))
+              -(CHARINDEX(N'Writes: ',b.Details)+8))))),
+        PercentComplete = TRY_CONVERT(decimal(19,2),LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'PercentComplete: ',b.Details)+17,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'PercentComplete: ',b.Details))
+              -(CHARINDEX(N'PercentComplete: ',b.Details)+17))))),
+        QuerySignature = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'QuerySignature: ',b.Details)+16,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'QuerySignature: ',b.Details))
+              -(CHARINDEX(N'QuerySignature: ',b.Details)+16)))),
+        SqlText = LTRIM(RTRIM(SUBSTRING(b.Details,
+            CHARINDEX(N'SQL text: ',b.Details)+10,
+            LEN(b.Details))))
+    FROM Base AS b
+    WHERE CHARINDEX(N'SessionId: ',b.Details) > 0
+      AND CHARINDEX(N'LoginName: ',b.Details) > 0
+      AND CHARINDEX(N'HostName: ',b.Details) > 0
+      AND CHARINDEX(N'ProgramName: ',b.Details) > 0
+      AND CHARINDEX(N'Status: ',b.Details) > 0
+      AND CHARINDEX(N'Command: ',b.Details) > 0
+      AND CHARINDEX(N'WaitType: ',b.Details) > 0
+      AND CHARINDEX(N'WaitSeconds: ',b.Details) > 0
+      AND CHARINDEX(N'BlockingSessionId: ',b.Details) > 0
+      AND CHARINDEX(N'CpuTimeMs: ',b.Details) > 0
+      AND CHARINDEX(N'ElapsedTimeMs: ',b.Details) > 0
+      AND CHARINDEX(N'LogicalReads: ',b.Details) > 0
+      AND CHARINDEX(N'Reads: ',b.Details) > 0
+      AND CHARINDEX(N'Writes: ',b.Details) > 0
+      AND CHARINDEX(N'PercentComplete: ',b.Details) > 0
+      AND CHARINDEX(N'QuerySignature: ',b.Details) > 0
+      AND CHARINDEX(N'SQL text: ',b.Details) > 0
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.DatabaseName,
+    p.SessionId,
+    p.LoginName,
+    p.HostName,
+    p.ProgramName,
+    p.Status,
+    p.Command,
+    p.WaitType,
+    p.WaitSeconds,
+    p.BlockingSessionId,
+    p.CpuTimeMs,
+    p.ElapsedTimeMs,
+    p.LogicalReads,
+    p.Reads,
+    p.Writes,
+    p.PercentComplete,
+    p.QuerySignature,
+    p.SqlText
+FROM Parsed AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
