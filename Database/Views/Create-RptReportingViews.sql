@@ -2104,7 +2104,47 @@ WHERE mi.IsEnabled = 1;
 GO
 
 /*=============================================================================
-  03G. Active Workload Detail Current - application workload only
+  03G. Query Workload Detail Current - latest classified capture per server
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_QueryWorkloadDetailCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM rpt.vw_QueryWorkloadDetail
+    GROUP BY InstanceId
+)
+SELECT
+    q.InstanceId,
+    q.InstanceName,
+    q.EnvironmentName,
+    q.CaptureTime,
+    q.DatabaseName,
+    q.RankingCategory,
+    q.QueryHash,
+    q.QueryPlanHash,
+    q.ExecutionCount,
+    q.TotalCpuMs,
+    q.AvgCpuMs,
+    q.TotalElapsedMs,
+    q.AvgElapsedMs,
+    q.TotalLogicalReads,
+    q.AvgLogicalReads,
+    q.TotalPhysicalReads,
+    q.AvgPhysicalReads,
+    q.TotalWrites,
+    q.AvgWrites,
+    q.SqlText
+FROM rpt.vw_QueryWorkloadDetail AS q
+INNER JOIN LatestCapture AS lc
+    ON lc.InstanceId = q.InstanceId
+   AND lc.CaptureTime = q.CaptureTime;
+GO
+
+/*=============================================================================
+  03H. Active Workload Detail Current - application workload only
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_ActiveWorkloadDetailCurrent
 AS
