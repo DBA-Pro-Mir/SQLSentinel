@@ -101,6 +101,7 @@ try {
 
     $QueryTimeout = 120
     $TopQueriesPerCategory = 25
+    $CandidateMultiplier = 4
     $LookbackMinutes = 60
     $MaxSqlTextLength = 1000
     $MinimumExecutionCount = 1
@@ -118,6 +119,10 @@ try {
             $TopQueriesPerCategory = [int]$queryStatsConfig.TopQueriesPerCategory
         }
 
+        if ($queryStatsConfig.PSObject.Properties.Name -contains "CandidateMultiplier") {
+            $CandidateMultiplier = [int]$queryStatsConfig.CandidateMultiplier
+        }
+
         if ($queryStatsConfig.PSObject.Properties.Name -contains "LookbackMinutes") {
             $LookbackMinutes = [int]$queryStatsConfig.LookbackMinutes
         }
@@ -133,6 +138,9 @@ try {
 
     if ($TopQueriesPerCategory -lt 1) { $TopQueriesPerCategory = 1 }
     if ($TopQueriesPerCategory -gt 100) { $TopQueriesPerCategory = 100 }
+    if ($CandidateMultiplier -lt 1) { $CandidateMultiplier = 1 }
+    if ($CandidateMultiplier -gt 10) { $CandidateMultiplier = 10 }
+    $CandidatePoolSize = $TopQueriesPerCategory * $CandidateMultiplier
     if ($LookbackMinutes -lt 1) { $LookbackMinutes = 60 }
     if ($MaxSqlTextLength -lt 100) { $MaxSqlTextLength = 100 }
     if ($MaxSqlTextLength -gt 4000) { $MaxSqlTextLength = 4000 }
@@ -149,7 +157,7 @@ try {
 
     Write-Info "Starting $CollectorName"
     Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
-    Write-Info "V2 settings: Top $TopQueriesPerCategory per category; lookback $LookbackMinutes minutes; SQL text $MaxSqlTextLength characters"
+    Write-Info "V2 settings: Top $TopQueriesPerCategory per category; candidate pool $CandidatePoolSize per category; lookback $LookbackMinutes minutes; SQL text $MaxSqlTextLength characters"
 
     $instances = Invoke-DbaQuery `
         -SqlInstance $CentralSqlInstance `
@@ -206,7 +214,7 @@ CREATE TABLE #Candidates
 );
 
 INSERT INTO #Candidates
-SELECT TOP ($TopQueriesPerCategory)
+SELECT TOP ($CandidatePoolSize)
     'CPU', sql_handle, plan_handle, query_hash, query_plan_hash,
     execution_count, creation_time, last_execution_time,
     total_worker_time, total_elapsed_time, total_logical_reads,
@@ -217,7 +225,7 @@ WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
 ORDER BY total_worker_time DESC;
 
 INSERT INTO #Candidates
-SELECT TOP ($TopQueriesPerCategory)
+SELECT TOP ($CandidatePoolSize)
     'Duration', sql_handle, plan_handle, query_hash, query_plan_hash,
     execution_count, creation_time, last_execution_time,
     total_worker_time, total_elapsed_time, total_logical_reads,
@@ -228,7 +236,7 @@ WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
 ORDER BY total_elapsed_time DESC;
 
 INSERT INTO #Candidates
-SELECT TOP ($TopQueriesPerCategory)
+SELECT TOP ($CandidatePoolSize)
     'LogicalReads', sql_handle, plan_handle, query_hash, query_plan_hash,
     execution_count, creation_time, last_execution_time,
     total_worker_time, total_elapsed_time, total_logical_reads,
@@ -239,7 +247,7 @@ WHERE last_execution_time >= DATEADD(MINUTE, -$LookbackMinutes, SYSDATETIME())
 ORDER BY total_logical_reads DESC;
 
 INSERT INTO #Candidates
-SELECT TOP ($TopQueriesPerCategory)
+SELECT TOP ($CandidatePoolSize)
     'Executions', sql_handle, plan_handle, query_hash, query_plan_hash,
     execution_count, creation_time, last_execution_time,
     total_worker_time, total_elapsed_time, total_logical_reads,
@@ -295,6 +303,36 @@ ORDER BY execution_count DESC;
         WHERE attribute = 'dbid'
     ) pa
     WHERE d.rn = 1
+), Filtered AS
+(
+    SELECT *
+    FROM Enriched
+    WHERE DatabaseName IS NOT NULL
+      AND DatabaseName NOT IN (N'master',N'model',N'msdb',N'tempdb')
+      AND RawSqlText NOT LIKE '%MetricSnapshot%'
+      AND RawSqlText NOT LIKE '%MetricTextSnapshot%'
+      AND RawSqlText NOT LIKE '%CollectionRunHistory%'
+      AND RawSqlText NOT LIKE '%SQLSentinel%'
+      AND RawSqlText NOT LIKE '%sys.dm_exec_query_stats%'
+      AND RawSqlText NOT LIKE '%BACKUP DATABASE%'
+      AND RawSqlText NOT LIKE '%BACKUP LOG%'
+      AND RawSqlText NOT LIKE '%RESTORE DATABASE%'
+      AND RawSqlText NOT LIKE '%RESTORE LOG%'
+), RankedFiltered AS
+(
+    SELECT
+        f.*,
+        FinalRank = ROW_NUMBER() OVER
+        (
+            PARTITION BY f.RankingCategory
+            ORDER BY
+                CASE WHEN f.RankingCategory = 'CPU' THEN f.TotalCpuMs END DESC,
+                CASE WHEN f.RankingCategory = 'Duration' THEN f.TotalElapsedMs END DESC,
+                CASE WHEN f.RankingCategory = 'LogicalReads' THEN f.TotalLogicalReads END DESC,
+                CASE WHEN f.RankingCategory = 'Executions' THEN CONVERT(decimal(19,2), f.execution_count) END DESC,
+                f.last_execution_time DESC
+        )
+    FROM Filtered f
 )
 SELECT
     RankingCategory,
@@ -316,12 +354,8 @@ SELECT
     AvgWrites,
     SqlText = LEFT(REPLACE(REPLACE(RawSqlText, CHAR(13), ' '), CHAR(10), ' '), $MaxSqlTextLength)
 INTO #CandidateDetails
-FROM Enriched
-WHERE RawSqlText NOT LIKE '%MetricSnapshot%'
-  AND RawSqlText NOT LIKE '%MetricTextSnapshot%'
-  AND RawSqlText NOT LIKE '%CollectionRunHistory%'
-  AND RawSqlText NOT LIKE '%SQLSentinel%'
-  AND RawSqlText NOT LIKE '%sys.dm_exec_query_stats%';
+FROM RankedFiltered
+WHERE FinalRank <= $TopQueriesPerCategory;
 
 SELECT
     TopCpuQueryCount = SUM(CASE WHEN RankingCategory = 'CPU' THEN 1 ELSE 0 END),
