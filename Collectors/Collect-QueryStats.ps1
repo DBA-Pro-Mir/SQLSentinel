@@ -429,6 +429,7 @@ DROP TABLE #Candidates;
                 $summary = $results.Tables[0].Rows[0]
 
                 $summaryMetrics = @(
+                    @{ Name = "WorkloadClassificationVersion"; Value = [decimal]2; Unit = "version" },
                     @{ Name = "TopCpuQueryCount"; Value = [decimal]$summary.TopCpuQueryCount; Unit = "count" },
                     @{ Name = "TopDurationQueryCount"; Value = [decimal]$summary.TopDurationQueryCount; Unit = "count" },
                     @{ Name = "TopLogicalReadQueryCount"; Value = [decimal]$summary.TopLogicalReadQueryCount; Unit = "count" },
