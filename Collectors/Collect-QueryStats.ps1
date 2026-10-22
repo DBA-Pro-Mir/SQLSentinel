@@ -358,10 +358,10 @@ FROM RankedFiltered
 WHERE FinalRank <= $TopQueriesPerCategory;
 
 SELECT
-    TopCpuQueryCount = SUM(CASE WHEN RankingCategory = 'CPU' THEN 1 ELSE 0 END),
-    TopDurationQueryCount = SUM(CASE WHEN RankingCategory = 'Duration' THEN 1 ELSE 0 END),
-    TopLogicalReadQueryCount = SUM(CASE WHEN RankingCategory = 'LogicalReads' THEN 1 ELSE 0 END),
-    TopExecutionQueryCount = SUM(CASE WHEN RankingCategory = 'Executions' THEN 1 ELSE 0 END),
+    TopCpuQueryCount = ISNULL(SUM(CASE WHEN RankingCategory = 'CPU' THEN 1 ELSE 0 END), 0),
+    TopDurationQueryCount = ISNULL(SUM(CASE WHEN RankingCategory = 'Duration' THEN 1 ELSE 0 END), 0),
+    TopLogicalReadQueryCount = ISNULL(SUM(CASE WHEN RankingCategory = 'LogicalReads' THEN 1 ELSE 0 END), 0),
+    TopExecutionQueryCount = ISNULL(SUM(CASE WHEN RankingCategory = 'Executions' THEN 1 ELSE 0 END), 0),
     DistinctQueriesCaptured = COUNT(DISTINCT
         CONCAT(
             CONVERT(varchar(34), query_hash, 1), ':',
