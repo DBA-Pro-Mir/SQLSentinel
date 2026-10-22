@@ -464,6 +464,7 @@ DROP TABLE #ActiveRequests;
                 $summary = $results.Tables[0].Rows[0]
 
                 $summaryMetrics = @(
+                    @{ Name = "WorkloadClassificationVersion"; Value = [decimal]2; Unit = "version" },
                     @{ Name = "ActiveRequestCount"; Value = (Get-SafeDecimal $summary.ActiveRequestCount); Unit = "count" },
                     @{ Name = "LongRunningRequestCount"; Value = (Get-SafeDecimal $summary.LongRunningRequestCount); Unit = "count" },
                     @{ Name = "HighCpuRequestCount"; Value = (Get-SafeDecimal $summary.HighCpuRequestCount); Unit = "count" },
