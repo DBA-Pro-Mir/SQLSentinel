@@ -38,12 +38,12 @@ foreach ($Collector in $Collectors)
 
     try
     {
+        # Collectors are PowerShell scripts, not native executables.
+        # Do not use $LASTEXITCODE here because it can retain a stale
+        # non-zero value from sqlcmd, git, or another native command.
+        # A terminating PowerShell error from the collector will be
+        # handled by the catch block below.
         & $Collector -ConfigPath $ConfigPath
-
-        if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE)
-        {
-            throw "Collector exited with code $LASTEXITCODE"
-        }
 
         Write-Host "[SUCCESS] $Collector completed." -ForegroundColor Green
         $Success++
