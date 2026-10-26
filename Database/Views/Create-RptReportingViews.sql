@@ -1925,7 +1925,69 @@ WHERE mi.IsEnabled = 1;
 GO
 
 /*=============================================================================
-  03E. Active Request Trend - classified application workload only
+  03E. Active Request Status Current - latest application workload by status
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ActiveRequestStatusCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM dbo.MetricTextSnapshot
+    WHERE SourceCollector = N'Collect-ActiveRequests'
+      AND MetricCategory = N'ActiveRequest'
+      AND DetailType = N'ActiveRequestByStatus'
+    GROUP BY InstanceId
+),
+Base AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime,
+        Details = REPLACE(mts.Details, CHAR(13), N''),
+        mts.NumericValue1,
+        mts.NumericValue2
+    FROM dbo.MetricTextSnapshot AS mts
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = mts.InstanceId
+       AND lc.CaptureTime = mts.CaptureTime
+    WHERE mts.SourceCollector = N'Collect-ActiveRequests'
+      AND mts.MetricCategory = N'ActiveRequest'
+      AND mts.DetailType = N'ActiveRequestByStatus'
+),
+Parsed AS
+(
+    SELECT
+        b.InstanceId,
+        b.CaptureTime,
+        RequestStatus = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'GroupValue: ', b.Details) + 12,
+            CHARINDEX(CHAR(10), b.Details + CHAR(10), CHARINDEX(N'GroupValue: ', b.Details))
+              - (CHARINDEX(N'GroupValue: ', b.Details) + 12)
+        ))),
+        ActiveRequestCount = TRY_CONVERT(bigint, b.NumericValue1),
+        TotalCpuMs = TRY_CONVERT(decimal(19,2), b.NumericValue2)
+    FROM Base AS b
+    WHERE CHARINDEX(N'GroupValue: ', b.Details) > 0
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.RequestStatus,
+    p.ActiveRequestCount,
+    p.TotalCpuMs
+FROM Parsed AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  03F. Active Request Trend - classified application workload only
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_ActiveRequestTrend
 AS
