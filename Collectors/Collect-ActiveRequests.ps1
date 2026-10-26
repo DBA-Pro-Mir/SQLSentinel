@@ -446,6 +446,20 @@ ORDER BY
     ISNULL(SUM(CAST(cpu_time AS bigint)), 0) DESC,
     ISNULL(SUM(CAST(total_elapsed_time AS bigint)), 0) DESC;
 
+SELECT
+    DetailType = 'ActiveRequestByStatus',
+    GroupValue = COALESCE(NULLIF(status, ''), '(unknown)'),
+    ActiveRequestCount = COUNT_BIG(1),
+    TotalCpuMs = ISNULL(SUM(CAST(cpu_time AS bigint)), 0),
+    TotalElapsedMs = ISNULL(SUM(CAST(total_elapsed_time AS bigint)), 0),
+    BlockedRequestCount = ISNULL(SUM(CASE WHEN blocking_session_id <> 0 THEN 1 ELSE 0 END), 0)
+FROM #ActiveRequests
+WHERE WorkloadClass = N'Application'
+GROUP BY COALESCE(NULLIF(status, ''), '(unknown)')
+ORDER BY
+    COUNT_BIG(1) DESC,
+    ISNULL(SUM(CAST(cpu_time AS bigint)), 0) DESC;
+
 DROP TABLE #ActiveRequests;
 "@
 
@@ -717,6 +731,58 @@ VALUES
     'Warning',
     $(Get-SafeDecimal $repeated.TotalCpuMs),
     $(Get-SafeDecimal $repeated.ActiveRequestCount),
+    N'$safeDetails',
+    '$CollectorName'
+);
+"@ `
+                        -QueryTimeout $QueryTimeout | Out-Null
+
+                    $RowsCollected++
+                }
+            }
+
+            if ($results.Tables.Count -gt 7) {
+                foreach ($statusGroup in $results.Tables[7].Rows) {
+
+                    $safeStatus = (Get-SafeString $statusGroup.GroupValue "(unknown)").Replace("'", "''")
+
+                    $detailText = @"
+DetailType: ActiveRequestByStatus
+GroupValue: $safeStatus
+ActiveRequestCount: $($statusGroup.ActiveRequestCount)
+TotalCpuMs: $($statusGroup.TotalCpuMs)
+TotalElapsedMs: $($statusGroup.TotalElapsedMs)
+BlockedRequestCount: $($statusGroup.BlockedRequestCount)
+"@
+
+                    $safeDetails = $detailText.Replace("'", "''")
+
+                    Invoke-DbaQuery `
+                        -SqlInstance $CentralSqlInstance `
+                        -SqlCredential $SqlCredential `
+                        -Database $CentralDatabase `
+                        -Query @"
+INSERT INTO dbo.MetricTextSnapshot
+(
+    InstanceId,
+    CaptureTime,
+    MetricCategory,
+    DetailType,
+    Severity,
+    NumericValue1,
+    NumericValue2,
+    Details,
+    SourceCollector
+)
+VALUES
+(
+    $InstanceId,
+    '$captureTime',
+    'ActiveRequest',
+    'ActiveRequestByStatus',
+    'Info',
+    $(Get-SafeDecimal $statusGroup.ActiveRequestCount),
+    $(Get-SafeDecimal $statusGroup.TotalCpuMs),
     N'$safeDetails',
     '$CollectorName'
 );
