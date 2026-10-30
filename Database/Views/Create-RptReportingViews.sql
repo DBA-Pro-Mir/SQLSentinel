@@ -849,6 +849,390 @@ WHERE mi.IsEnabled = 1;
 GO
 
 /*=============================================================================
+  11A. SQL Agent Alert Health Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SQLAgentAlertHealthCurrent
+AS
+WITH L AS
+(
+    SELECT
+        ms.*,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY ms.InstanceId, ms.CounterName
+            ORDER BY ms.CaptureTime DESC
+        ) AS rn
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-SqlAgentAlerts'
+      AND ms.MetricCategory = N'SqlAgentAlert'
+      AND ms.ObjectName = N'SqlAgentAlertSummary'
+),
+A AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime,
+        MAX(CASE WHEN CounterName=N'TotalAlerts'
+                 THEN MetricValue END) AS TotalAlerts,
+        MAX(CASE WHEN CounterName=N'EnabledAlerts'
+                 THEN MetricValue END) AS EnabledAlerts,
+        MAX(CASE WHEN CounterName=N'DisabledAlerts'
+                 THEN MetricValue END) AS DisabledAlerts,
+        MAX(CASE WHEN CounterName=N'SeverityAlerts'
+                 THEN MetricValue END) AS SeverityAlerts,
+        MAX(CASE WHEN CounterName=N'ErrorNumberAlerts'
+                 THEN MetricValue END) AS ErrorNumberAlerts,
+        MAX(CASE WHEN CounterName=N'AlertsWithNotifications'
+                 THEN MetricValue END) AS AlertsWithNotifications,
+        MAX(CASE WHEN CounterName=N'AlertsWithoutNotifications'
+                 THEN MetricValue END) AS AlertsWithoutNotifications,
+        MAX(CASE WHEN CounterName=N'AlertsWithOccurrences'
+                 THEN MetricValue END) AS AlertsWithOccurrences,
+        MAX(CASE WHEN CounterName=N'AlertsTriggeredRecently'
+                 THEN MetricValue END) AS AlertsTriggeredRecently,
+        MAX(CASE WHEN CounterName=N'AlertsRespondedRecently'
+                 THEN MetricValue END) AS AlertsRespondedRecently,
+        MAX(CASE WHEN CounterName=N'MaxOccurrenceCount'
+                 THEN MetricValue END) AS MaxOccurrenceCount
+    FROM L
+    WHERE rn=1
+    GROUP BY InstanceId
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    a.CaptureTime,
+    a.TotalAlerts,
+    a.EnabledAlerts,
+    a.DisabledAlerts,
+    a.SeverityAlerts,
+    a.ErrorNumberAlerts,
+    a.AlertsWithNotifications,
+    a.AlertsWithoutNotifications,
+    a.AlertsWithOccurrences,
+    a.AlertsTriggeredRecently,
+    a.AlertsRespondedRecently,
+    a.MaxOccurrenceCount
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN A AS a
+    ON a.InstanceId = mi.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  11B. SQL Agent Job Failures Current - latest collector capture per server
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SQLAgentJobFailureCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM dbo.MetricSnapshot
+    WHERE SourceCollector = N'Collect-SqlAgentJobs'
+      AND MetricCategory = N'SqlAgentJob'
+      AND ObjectName = N'SqlAgentJobSummary'
+    GROUP BY InstanceId
+),
+Base AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime,
+        mts.Severity,
+        Details = REPLACE(mts.Details, CHAR(13), N'')
+    FROM dbo.MetricTextSnapshot AS mts
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = mts.InstanceId
+       AND lc.CaptureTime = mts.CaptureTime
+    WHERE mts.SourceCollector = N'Collect-SqlAgentJobs'
+      AND mts.MetricCategory = N'SqlAgentJob'
+      AND mts.DetailType = N'JobFailure'
+),
+Parsed AS
+(
+    SELECT
+        b.InstanceId,
+        b.CaptureTime,
+        b.Severity,
+        JobName = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'JobName: ',b.Details)+9,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'JobName: ',b.Details))
+              -(CHARINDEX(N'JobName: ',b.Details)+9)
+        ))),
+        RunDateTime = TRY_CONVERT(datetime2(0),LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'RunDateTime: ',b.Details)+13,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'RunDateTime: ',b.Details))
+              -(CHARINDEX(N'RunDateTime: ',b.Details)+13)
+        )))),
+        RunDurationSeconds = TRY_CONVERT(bigint,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'RunDurationSeconds: ',b.Details)+20,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'RunDurationSeconds: ',b.Details))
+              -(CHARINDEX(N'RunDurationSeconds: ',b.Details)+20)
+        )))),
+        RunStatus = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'RunStatus: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'RunStatus: ',b.Details))
+              -(CHARINDEX(N'RunStatus: ',b.Details)+11)
+        ))),
+        Message = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'Message: ',b.Details)+9,
+            LEN(b.Details)
+        )))
+    FROM Base AS b
+    WHERE CHARINDEX(N'JobName: ',b.Details) > 0
+      AND CHARINDEX(N'RunDateTime: ',b.Details) > 0
+      AND CHARINDEX(N'RunDurationSeconds: ',b.Details) > 0
+      AND CHARINDEX(N'RunStatus: ',b.Details) > 0
+      AND CHARINDEX(N'Message: ',b.Details) > 0
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.JobName,
+    p.RunDateTime,
+    p.RunDurationSeconds,
+    p.RunStatus,
+    p.Severity,
+    p.Message
+FROM Parsed AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  11C. SQL Agent Running Jobs Current - latest collector capture per server
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SQLAgentRunningJobCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM dbo.MetricSnapshot
+    WHERE SourceCollector = N'Collect-SqlAgentJobs'
+      AND MetricCategory = N'SqlAgentJob'
+      AND ObjectName = N'SqlAgentJobSummary'
+    GROUP BY InstanceId
+),
+Base AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime,
+        mts.Severity,
+        Details = REPLACE(mts.Details, CHAR(13), N'')
+    FROM dbo.MetricTextSnapshot AS mts
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = mts.InstanceId
+       AND lc.CaptureTime = mts.CaptureTime
+    WHERE mts.SourceCollector = N'Collect-SqlAgentJobs'
+      AND mts.MetricCategory = N'SqlAgentJob'
+      AND mts.DetailType = N'RunningJob'
+),
+Parsed AS
+(
+    SELECT
+        b.InstanceId,
+        b.CaptureTime,
+        b.Severity,
+        JobName = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'JobName: ',b.Details)+9,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'JobName: ',b.Details))
+              -(CHARINDEX(N'JobName: ',b.Details)+9)
+        ))),
+        StartExecutionDate = TRY_CONVERT(datetime2(0),LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'StartExecutionDate: ',b.Details)+20,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'StartExecutionDate: ',b.Details))
+              -(CHARINDEX(N'StartExecutionDate: ',b.Details)+20)
+        )))),
+        RunningSeconds = TRY_CONVERT(bigint,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'RunningSeconds: ',b.Details)+16,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'RunningSeconds: ',b.Details))
+              -(CHARINDEX(N'RunningSeconds: ',b.Details)+16)
+        ))))
+    FROM Base AS b
+    WHERE CHARINDEX(N'JobName: ',b.Details) > 0
+      AND CHARINDEX(N'StartExecutionDate: ',b.Details) > 0
+      AND CHARINDEX(N'RunningSeconds: ',b.Details) > 0
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.JobName,
+    p.StartExecutionDate,
+    p.RunningSeconds,
+    p.Severity
+FROM Parsed AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  11D. SQL Agent Alert Detail Current - latest collector capture per server
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SQLAgentAlertDetailCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM dbo.MetricSnapshot
+    WHERE SourceCollector = N'Collect-SqlAgentAlerts'
+      AND MetricCategory = N'SqlAgentAlert'
+      AND ObjectName = N'SqlAgentAlertSummary'
+    GROUP BY InstanceId
+),
+Base AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime,
+        mts.DetailType,
+        mts.Severity,
+        mts.NumericValue1,
+        mts.NumericValue2,
+        Details = REPLACE(mts.Details, CHAR(13), N'')
+    FROM dbo.MetricTextSnapshot AS mts
+    INNER JOIN LatestCapture AS lc
+        ON lc.InstanceId = mts.InstanceId
+       AND lc.CaptureTime = mts.CaptureTime
+    WHERE mts.SourceCollector = N'Collect-SqlAgentAlerts'
+      AND mts.MetricCategory = N'SqlAgentAlert'
+      AND mts.DetailType IN (N'AlertConfigIssue',N'AlertTriggered',N'AlertConfig')
+),
+Parsed AS
+(
+    SELECT
+        b.InstanceId,
+        b.CaptureTime,
+        b.DetailType,
+        b.Severity,
+        AlertId = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'AlertId: ',b.Details)+9,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AlertId: ',b.Details))
+              -(CHARINDEX(N'AlertId: ',b.Details)+9)
+        )))),
+        AlertName = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'AlertName: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'AlertName: ',b.Details))
+              -(CHARINDEX(N'AlertName: ',b.Details)+11)
+        ))),
+        IssueReason = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'IssueReason: ',b.Details)+13,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'IssueReason: ',b.Details))
+              -(CHARINDEX(N'IssueReason: ',b.Details)+13)
+        ))),
+        IsEnabled = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'IsEnabled: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'IsEnabled: ',b.Details))
+              -(CHARINDEX(N'IsEnabled: ',b.Details)+11)
+        )))),
+        MessageId = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'MessageId: ',b.Details)+11,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'MessageId: ',b.Details))
+              -(CHARINDEX(N'MessageId: ',b.Details)+11)
+        )))),
+        SeverityNumber = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'SeverityNumber: ',b.Details)+16,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'SeverityNumber: ',b.Details))
+              -(CHARINDEX(N'SeverityNumber: ',b.Details)+16)
+        )))),
+        DatabaseName = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'DatabaseName: ',b.Details)+14,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'DatabaseName: ',b.Details))
+              -(CHARINDEX(N'DatabaseName: ',b.Details)+14)
+        ))),
+        OccurrenceCount = TRY_CONVERT(bigint,b.NumericValue1),
+        WasTriggeredRecently = TRY_CONVERT(int,b.NumericValue2),
+        LastOccurrenceDateTime = TRY_CONVERT(datetime2(0),NULLIF(LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'LastOccurrenceDateTime: ',b.Details)+24,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'LastOccurrenceDateTime: ',b.Details))
+              -(CHARINDEX(N'LastOccurrenceDateTime: ',b.Details)+24)
+        ))),N'')),
+        HasNotification = TRY_CONVERT(int,LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'HasNotification: ',b.Details)+17,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'HasNotification: ',b.Details))
+              -(CHARINDEX(N'HasNotification: ',b.Details)+17)
+        )))),
+        OperatorNames = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'OperatorNames: ',b.Details)+15,
+            CHARINDEX(CHAR(10),b.Details+CHAR(10),CHARINDEX(N'OperatorNames: ',b.Details))
+              -(CHARINDEX(N'OperatorNames: ',b.Details)+15)
+        ))),
+        NotificationMethods = LTRIM(RTRIM(SUBSTRING(
+            b.Details,
+            CHARINDEX(N'NotificationMethods: ',b.Details)+21,
+            LEN(b.Details)
+        )))
+    FROM Base AS b
+    WHERE CHARINDEX(N'AlertId: ',b.Details) > 0
+      AND CHARINDEX(N'AlertName: ',b.Details) > 0
+      AND CHARINDEX(N'IssueReason: ',b.Details) > 0
+      AND CHARINDEX(N'IsEnabled: ',b.Details) > 0
+      AND CHARINDEX(N'MessageId: ',b.Details) > 0
+      AND CHARINDEX(N'SeverityNumber: ',b.Details) > 0
+      AND CHARINDEX(N'DatabaseName: ',b.Details) > 0
+      AND CHARINDEX(N'LastOccurrenceDateTime: ',b.Details) > 0
+      AND CHARINDEX(N'HasNotification: ',b.Details) > 0
+      AND CHARINDEX(N'OperatorNames: ',b.Details) > 0
+      AND CHARINDEX(N'NotificationMethods: ',b.Details) > 0
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.DetailType,
+    p.Severity,
+    p.AlertId,
+    p.AlertName,
+    p.IssueReason,
+    p.IsEnabled,
+    p.MessageId,
+    p.SeverityNumber,
+    p.DatabaseName,
+    p.OccurrenceCount,
+    p.LastOccurrenceDateTime,
+    p.WasTriggeredRecently,
+    p.HasNotification,
+    p.OperatorNames,
+    p.NotificationMethods
+FROM Parsed AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
   12. Wait Pressure Current
 
   NOTE: This is synchronized from the current SQLMonitoring definition.
