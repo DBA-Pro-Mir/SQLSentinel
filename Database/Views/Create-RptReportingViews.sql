@@ -849,7 +849,30 @@ WHERE mi.IsEnabled = 1;
 GO
 
 /*=============================================================================
-  11A. SQL Agent Alert Health Current
+  11A. SQL Agent Job Outcome Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SQLAgentJobOutcomeCurrent
+AS
+SELECT
+    h.InstanceId,
+    h.InstanceName,
+    h.EnvironmentName,
+    h.CaptureTime,
+    v.Outcome,
+    v.JobCount
+FROM rpt.vw_SQLAgentHealthCurrent AS h
+CROSS APPLY
+(
+    VALUES
+        (N'Succeeded', h.RecentSucceededJobs),
+        (N'Failed',    h.RecentFailedJobs),
+        (N'Retry',     h.RecentRetryJobs),
+        (N'Canceled',  h.RecentCanceledJobs)
+) AS v(Outcome, JobCount);
+GO
+
+/*=============================================================================
+  11B. SQL Agent Alert Health Current
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_SQLAgentAlertHealthCurrent
 AS
