@@ -267,6 +267,15 @@ SELECT TOP ($MaximumDetailRows)
 FROM #RunningJobs
 ORDER BY RunningSeconds DESC;
 
+SELECT
+    JobName,
+    RunDateTime,
+    RunDurationSeconds,
+    RunStatusDescription
+FROM #RecentJobHistory
+WHERE RunDateTime IS NOT NULL
+ORDER BY RunDateTime DESC, JobName;
+
 DROP TABLE #RecentJobHistory;
 DROP TABLE #RunningJobs;
 "@
@@ -435,6 +444,84 @@ VALUES
                         -QueryTimeout $QueryTimeout | Out-Null
 
                     $RowsCollected++
+                }
+            }
+
+            if ($results.Tables.Count -gt 5) {
+                foreach ($jobExecution in $results.Tables[5].Rows) {
+
+                    $jobName = if ([string]::IsNullOrWhiteSpace([string]$jobExecution.JobName)) { "(unknown)" } else { [string]$jobExecution.JobName }
+                    $runStatus = if ([string]::IsNullOrWhiteSpace([string]$jobExecution.RunStatusDescription)) { "Unknown" } else { [string]$jobExecution.RunStatusDescription }
+
+                    if ($null -eq $jobExecution.RunDateTime -or [System.DBNull]::Value.Equals($jobExecution.RunDateTime)) {
+                        continue
+                    }
+
+                    $runDateTime = ([datetime]$jobExecution.RunDateTime).ToString("yyyy-MM-dd HH:mm:ss")
+                    $runDurationSeconds = [decimal]$jobExecution.RunDurationSeconds
+                    $safeJobName = $jobName.Replace("'", "''")
+                    $safeRunStatus = $runStatus.Replace("'", "''")
+
+                    $insertResult = Invoke-DbaQuery `
+                        -SqlInstance $CentralSqlInstance `
+                        -SqlCredential $SqlCredential `
+                        -Database $CentralDatabase `
+                        -Query @"
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.MetricSnapshot
+    WHERE InstanceId = $InstanceId
+      AND CaptureTime = '$runDateTime'
+      AND ObjectName = N'SqlAgentJobExecution'
+      AND CounterName = N'$safeRunStatus'
+      AND InstanceName = N'$safeJobName'
+      AND MetricCategory = N'SqlAgentJobExecution'
+      AND SourceCollector = N'$CollectorName'
+)
+BEGIN
+    INSERT INTO dbo.MetricSnapshot
+    (
+        InstanceId,
+        CaptureTime,
+        DatabaseName,
+        ObjectName,
+        CounterName,
+        InstanceName,
+        MetricCategory,
+        MetricValue,
+        MetricType,
+        Unit,
+        SourceCollector
+    )
+    VALUES
+    (
+        $InstanceId,
+        '$runDateTime',
+        NULL,
+        N'SqlAgentJobExecution',
+        N'$safeRunStatus',
+        N'$safeJobName',
+        N'SqlAgentJobExecution',
+        $runDurationSeconds,
+        N'Gauge',
+        N'sec',
+        N'$CollectorName'
+    );
+
+    SELECT Inserted = 1;
+END
+ELSE
+BEGIN
+    SELECT Inserted = 0;
+END;
+"@ `
+                        -As SingleValue `
+                        -QueryTimeout $QueryTimeout
+
+                    if ([int]$insertResult -eq 1) {
+                        $RowsCollected++
+                    }
                 }
             }
 
