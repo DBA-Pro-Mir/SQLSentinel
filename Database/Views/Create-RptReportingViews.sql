@@ -872,7 +872,29 @@ CROSS APPLY
 GO
 
 /*=============================================================================
-  11B. SQL Agent Alert Health Current
+  11B. SQL Agent Job Execution History
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SQLAgentJobExecutionHistory
+AS
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    ms.CaptureTime AS RunDateTime,
+    ms.InstanceName AS JobName,
+    ms.CounterName AS RunStatus,
+    RunDurationSeconds = TRY_CONVERT(bigint, ms.MetricValue)
+FROM dbo.MetricSnapshot AS ms
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = ms.InstanceId
+WHERE mi.IsEnabled = 1
+  AND ms.SourceCollector = N'Collect-SqlAgentJobs'
+  AND ms.MetricCategory = N'SqlAgentJobExecution'
+  AND ms.ObjectName = N'SqlAgentJobExecution';
+GO
+
+/*=============================================================================
+  11C. SQL Agent Alert Health Current
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_SQLAgentAlertHealthCurrent
 AS
