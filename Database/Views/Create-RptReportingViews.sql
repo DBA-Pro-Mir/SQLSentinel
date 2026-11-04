@@ -630,6 +630,77 @@ WHERE mi.IsEnabled = 1;
 GO
 
 /*=============================================================================
+  08A. Deadlock Detail
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_DeadlockDetail
+AS
+WITH D AS
+(
+    SELECT
+        mts.InstanceId,
+        mts.CaptureTime AS DeadlockTime,
+        mts.DatabaseName,
+        mts.Severity,
+        mts.XmlDetails,
+        VictimProcessId =
+            mts.XmlDetails.value('(/deadlock/victim-list/victimProcess/@id)[1]','nvarchar(100)')
+    FROM dbo.MetricTextSnapshot AS mts
+    WHERE mts.SourceCollector = N'Collect-Deadlocks'
+      AND mts.MetricCategory = N'Deadlock'
+      AND mts.DetailType = N'DeadlockDetail'
+      AND mts.XmlDetails IS NOT NULL
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    d.DeadlockTime,
+    d.DatabaseName,
+    d.Severity,
+    VictimSpid =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@spid)[1]','int'),
+    OtherSpid =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/@spid)[1]','int'),
+    VictimLogin =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@loginname)[1]','nvarchar(256)'),
+    VictimHost =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@hostname)[1]','nvarchar(256)'),
+    VictimApplication =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@clientapp)[1]','nvarchar(512)'),
+    VictimTransaction =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@transactionname)[1]','nvarchar(256)'),
+    VictimWaitResource =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@waitresource)[1]','nvarchar(512)'),
+    VictimLockMode =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/@lockMode)[1]','nvarchar(50)'),
+    VictimSqlText =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id=sql:column("d.VictimProcessId")]/inputbuf/text())[1]','nvarchar(4000)'),
+    OtherLogin =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/@loginname)[1]','nvarchar(256)'),
+    OtherHost =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/@hostname)[1]','nvarchar(256)'),
+    OtherApplication =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/@clientapp)[1]','nvarchar(512)'),
+    OtherWaitResource =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/@waitresource)[1]','nvarchar(512)'),
+    OtherLockMode =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/@lockMode)[1]','nvarchar(50)'),
+    OtherSqlText =
+        d.XmlDetails.value('(/deadlock/process-list/process[@id != sql:column("d.VictimProcessId")][1]/inputbuf/text())[1]','nvarchar(4000)'),
+    ResourceType =
+        d.XmlDetails.value('local-name((/deadlock/resource-list/*)[1])','nvarchar(128)'),
+    ResourceObject =
+        d.XmlDetails.value('(/deadlock/resource-list/*[1]/@objectname)[1]','nvarchar(512)'),
+    ResourceIndex =
+        d.XmlDetails.value('(/deadlock/resource-list/*[1]/@indexname)[1]','nvarchar(512)'),
+    d.XmlDetails
+FROM D AS d
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = d.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
   09. Performance Health Current
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_PerformanceHealthCurrent
