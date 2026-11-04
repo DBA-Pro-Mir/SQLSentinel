@@ -205,6 +205,46 @@ VALUES
                 }
             }
 
+            # Capture current user database inventory counts for estate reporting.
+            $databaseCounts = Invoke-DbaQuery -SqlInstance $TargetInstance -SqlCredential $SqlCredential -Database master -Query @"
+SELECT
+    CaptureTime = SYSDATETIME(),
+    TotalUserDatabases =
+        SUM(CASE WHEN database_id > 4
+                  AND source_database_id IS NULL
+                 THEN 1 ELSE 0 END),
+    OnlineUserDatabases =
+        SUM(CASE WHEN database_id > 4
+                  AND source_database_id IS NULL
+                  AND state = 0
+                 THEN 1 ELSE 0 END),
+    OfflineUserDatabases =
+        SUM(CASE WHEN database_id > 4
+                  AND source_database_id IS NULL
+                  AND state = 6
+                 THEN 1 ELSE 0 END)
+FROM sys.databases;
+"@ -QueryTimeout $QueryTimeout -EnableException | Select-Object -First 1
+
+            if ($null -ne $databaseCounts) {
+                $dbCountCapture = ([datetime]$databaseCounts.CaptureTime).ToString("yyyy-MM-dd HH:mm:ss")
+                $dbCountMetrics = @(
+                    @{ Name="TotalUserDatabases"; Value=[decimal]$databaseCounts.TotalUserDatabases },
+                    @{ Name="OnlineUserDatabases"; Value=[decimal]$databaseCounts.OnlineUserDatabases },
+                    @{ Name="OfflineUserDatabases"; Value=[decimal]$databaseCounts.OfflineUserDatabases }
+                )
+
+                foreach ($metric in $dbCountMetrics) {
+                    Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -Query @"
+INSERT INTO dbo.MetricSnapshot
+(InstanceId,CaptureTime,DatabaseName,ObjectName,CounterName,InstanceName,MetricCategory,MetricValue,MetricType,Unit,SourceCollector)
+VALUES
+($InstanceId,'$dbCountCapture',NULL,N'DatabaseInventory',N'$($metric.Name)',NULL,N'DatabaseInventory',$($metric.Value),N'Gauge',N'count',N'$CollectorName');
+"@ -QueryTimeout 30 | Out-Null
+                    $RowsCollected++
+                }
+            }
+
             Complete-CollectionRun -CentralSqlInstance $CentralSqlInstance -CentralDatabase $CentralDatabase -SqlCredential $SqlCredential -CollectionRunId $CollectionRunId -Status "Success" -RowsCollected $RowsCollected
             Write-Info "Completed $TargetInstance. Rows collected: $RowsCollected"
         }
