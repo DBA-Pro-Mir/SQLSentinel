@@ -102,7 +102,7 @@ try {
     $CentralSqlInstance = $config.CentralSqlInstance
     $CentralDatabase = $config.CentralDatabase
 
-    $QueryTimeout = 30
+    $QueryTimeout = 120
     $LookbackHours = 24
     $MaximumDeadlocks = 100
 
