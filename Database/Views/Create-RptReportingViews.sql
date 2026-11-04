@@ -286,6 +286,54 @@ WHERE ms.SourceCollector = N'Collect-Connections'
 GO
 
 /*=============================================================================
+  03I. Database Inventory Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_DatabaseInventoryCurrent
+AS
+WITH L AS
+(
+    SELECT
+        ms.*,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY ms.InstanceId, ms.CounterName
+            ORDER BY ms.CaptureTime DESC
+        ) AS rn
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-PerformanceCounters'
+      AND ms.MetricCategory = N'DatabaseInventory'
+      AND ms.ObjectName = N'DatabaseInventory'
+),
+A AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime,
+        MAX(CASE WHEN CounterName=N'TotalUserDatabases'
+                 THEN MetricValue END) AS TotalUserDatabases,
+        MAX(CASE WHEN CounterName=N'OnlineUserDatabases'
+                 THEN MetricValue END) AS OnlineUserDatabases,
+        MAX(CASE WHEN CounterName=N'OfflineUserDatabases'
+                 THEN MetricValue END) AS OfflineUserDatabases
+    FROM L
+    WHERE rn = 1
+    GROUP BY InstanceId
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    a.CaptureTime,
+    a.TotalUserDatabases,
+    a.OnlineUserDatabases,
+    a.OfflineUserDatabases
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN A AS a
+    ON a.InstanceId = mi.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
   04. Repository Health
 =============================================================================*/
 CREATE OR ALTER VIEW rpt.vw_RepositoryHealth
