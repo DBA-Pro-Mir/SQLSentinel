@@ -12,6 +12,7 @@ $Collectors = @(
     ".\Collectors\Collect-WaitStats.ps1",
     ".\Collectors\Collect-ActiveRequests.ps1",
     ".\Collectors\Collect-Blocking.ps1",
+    ".\Collectors\Collect-Deadlocks.ps1",
     ".\Collectors\Collect-Connections.ps1",
     ".\Collectors\Collect-Backups.ps1",
     ".\Collectors\Collect-QueryStats.ps1",
