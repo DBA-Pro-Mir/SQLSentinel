@@ -9,6 +9,7 @@ $ErrorActionPreference = "Continue"
 $Collectors = @(
     ".\Collectors\Collect-PerformanceCounters.ps1",
     ".\Collectors\Collect-DatabaseIO.ps1",
+    ".\Collectors\Collect-StorageCapacity.ps1",
     ".\Collectors\Collect-WaitStats.ps1",
     ".\Collectors\Collect-ActiveRequests.ps1",
     ".\Collectors\Collect-Blocking.ps1",
