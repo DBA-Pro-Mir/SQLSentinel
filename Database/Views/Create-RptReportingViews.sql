@@ -2914,3 +2914,169 @@ INNER JOIN dbo.MonitoredInstances AS mi
     ON mi.InstanceId = p.InstanceId
 WHERE mi.IsEnabled = 1;
 GO
+
+/*=============================================================================
+  Storage & Capacity - Current Volume Capacity
+  Expected collector contract:
+    SourceCollector = Collect-StorageCapacity
+    MetricCategory  = StorageVolume
+    ObjectName      = StorageVolume
+    InstanceName    = VolumeName / mount point
+    CounterName     = TotalGB | FreeGB | FreePercent | UsedGB
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_StorageVolumeCurrent
+AS
+WITH Ranked AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime,
+        VolumeName = ms.InstanceName,
+        ms.CounterName,
+        ms.MetricValue,
+        rn = ROW_NUMBER() OVER
+        (
+            PARTITION BY ms.InstanceId, ms.InstanceName, ms.CounterName
+            ORDER BY ms.CaptureTime DESC
+        )
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-StorageCapacity'
+      AND ms.MetricCategory = N'StorageVolume'
+      AND ms.ObjectName = N'StorageVolume'
+),
+P AS
+(
+    SELECT
+        InstanceId,
+        VolumeName,
+        CaptureTime = MAX(CASE WHEN rn = 1 THEN CaptureTime END),
+        TotalGB = MAX(CASE WHEN CounterName = N'TotalGB' AND rn = 1 THEN MetricValue END),
+        UsedGB = MAX(CASE WHEN CounterName = N'UsedGB' AND rn = 1 THEN MetricValue END),
+        FreeGB = MAX(CASE WHEN CounterName = N'FreeGB' AND rn = 1 THEN MetricValue END),
+        FreePercent = MAX(CASE WHEN CounterName = N'FreePercent' AND rn = 1 THEN MetricValue END)
+    FROM Ranked
+    GROUP BY
+        InstanceId,
+        VolumeName
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.VolumeName,
+    p.TotalGB,
+    p.UsedGB,
+    p.FreeGB,
+    p.FreePercent,
+    StorageHealth =
+        CASE
+            WHEN p.InstanceId IS NULL
+              OR p.FreePercent IS NULL
+                THEN N'Unknown'
+            WHEN p.FreePercent < 10
+                THEN N'Critical'
+            WHEN p.FreePercent < 20
+                THEN N'Warning'
+            ELSE N'Healthy'
+        END
+FROM dbo.MonitoredInstances AS mi
+INNER JOIN P AS p
+    ON p.InstanceId = mi.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  Storage & Capacity - Current Database Size
+  Expected collector contract:
+    SourceCollector = Collect-StorageCapacity
+    MetricCategory  = DatabaseSize
+    ObjectName      = DatabaseSize
+    DatabaseName    = database
+    CounterName     = DataSizeGB | LogSizeGB | TotalSizeGB
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_DatabaseSizeCurrent
+AS
+WITH Ranked AS
+(
+    SELECT
+        ms.InstanceId,
+        ms.CaptureTime,
+        ms.DatabaseName,
+        ms.CounterName,
+        ms.MetricValue,
+        rn = ROW_NUMBER() OVER
+        (
+            PARTITION BY ms.InstanceId, ms.DatabaseName, ms.CounterName
+            ORDER BY ms.CaptureTime DESC
+        )
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.SourceCollector = N'Collect-StorageCapacity'
+      AND ms.MetricCategory = N'DatabaseSize'
+      AND ms.ObjectName = N'DatabaseSize'
+),
+P AS
+(
+    SELECT
+        InstanceId,
+        DatabaseName,
+        CaptureTime = MAX(CASE WHEN rn = 1 THEN CaptureTime END),
+        DataSizeGB = MAX(CASE WHEN CounterName = N'DataSizeGB' AND rn = 1 THEN MetricValue END),
+        LogSizeGB = MAX(CASE WHEN CounterName = N'LogSizeGB' AND rn = 1 THEN MetricValue END),
+        TotalSizeGB = MAX(CASE WHEN CounterName = N'TotalSizeGB' AND rn = 1 THEN MetricValue END)
+    FROM Ranked
+    GROUP BY
+        InstanceId,
+        DatabaseName
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    p.CaptureTime,
+    p.DatabaseName,
+    p.DataSizeGB,
+    p.LogSizeGB,
+    p.TotalSizeGB
+FROM P AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = p.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  Storage & Capacity - Top 10 Largest Databases Per Server
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_DatabaseSizeTop
+AS
+WITH Ranked AS
+(
+    SELECT
+        d.InstanceId,
+        d.InstanceName,
+        d.EnvironmentName,
+        d.CaptureTime,
+        d.DatabaseName,
+        d.DataSizeGB,
+        d.LogSizeGB,
+        d.TotalSizeGB,
+        SizeRank = ROW_NUMBER() OVER
+        (
+            PARTITION BY d.InstanceId
+            ORDER BY d.TotalSizeGB DESC, d.DatabaseName
+        )
+    FROM rpt.vw_DatabaseSizeCurrent AS d
+)
+SELECT
+    InstanceId,
+    InstanceName,
+    EnvironmentName,
+    CaptureTime,
+    DatabaseName,
+    DataSizeGB,
+    LogSizeGB,
+    TotalSizeGB,
+    SizeRank
+FROM Ranked
+WHERE SizeRank <= 10;
+GO
