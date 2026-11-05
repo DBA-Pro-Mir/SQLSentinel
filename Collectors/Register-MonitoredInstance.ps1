@@ -123,6 +123,50 @@ SELECT
             Write-Success "VIEW SERVER STATE permission validated."
         }
 
+        Write-Info "Validating VIEW ANY DEFINITION permission"
+
+        $metadataPermissionQuery = @"
+SELECT
+    HasViewAnyDefinition =
+        HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW ANY DEFINITION'),
+    HasViewAnyDatabase =
+        HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW ANY DATABASE');
+"@
+
+        $metadataPermissionResult = Invoke-DbaQuery `
+            -SqlInstance $InstanceName `
+            -SqlCredential $SqlCredential `
+            -Database master `
+            -Query $metadataPermissionQuery `
+            -QueryTimeout 15
+
+        if ([int]$metadataPermissionResult.HasViewAnyDefinition -ne 1) {
+            Write-Warn "VIEW ANY DEFINITION is missing on $InstanceName"
+            Write-Warn "Storage/capacity collection requires visibility to sys.master_files."
+            Write-Host ""
+            Write-Host "USE master;"
+            Write-Host "GO"
+            Write-Host "GRANT VIEW ANY DEFINITION TO [sqlsentinel];"
+            Write-Host "GO"
+            Write-Host ""
+        }
+        else {
+            Write-Success "VIEW ANY DEFINITION permission validated."
+        }
+
+        if ([int]$metadataPermissionResult.HasViewAnyDatabase -ne 1) {
+            Write-Warn "VIEW ANY DATABASE is missing on $InstanceName"
+            Write-Host ""
+            Write-Host "USE master;"
+            Write-Host "GO"
+            Write-Host "GRANT VIEW ANY DATABASE TO [sqlsentinel];"
+            Write-Host "GO"
+            Write-Host ""
+        }
+        else {
+            Write-Success "VIEW ANY DATABASE permission validated."
+        }
+
         Write-Info "Validating msdb read access"
 
         try {
