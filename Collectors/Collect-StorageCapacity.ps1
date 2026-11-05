@@ -249,6 +249,35 @@ ORDER BY InstanceName;
                 -InstanceId $InstanceId `
                 -CollectorName $CollectorName
 
+            $permissionQuery = @"
+SELECT
+    HasViewServerState =
+        HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE'),
+    HasViewAnyDefinition =
+        HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW ANY DEFINITION'),
+    HasViewAnyDatabase =
+        HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW ANY DATABASE');
+"@
+
+            $permissionResult = Invoke-SentinelQuery `
+                -SqlInstance $TargetInstance `
+                -Database master `
+                -SqlCredential $SqlCredential `
+                -Query $permissionQuery `
+                -QueryTimeout 30
+
+            if ([int]$permissionResult.HasViewServerState -ne 1) {
+                throw "sqlsentinel is missing VIEW SERVER STATE on $TargetInstance."
+            }
+
+            if ([int]$permissionResult.HasViewAnyDefinition -ne 1) {
+                throw "sqlsentinel is missing VIEW ANY DEFINITION on $TargetInstance. Run: GRANT VIEW ANY DEFINITION TO [sqlsentinel];"
+            }
+
+            if ([int]$permissionResult.HasViewAnyDatabase -ne 1) {
+                throw "sqlsentinel is missing VIEW ANY DATABASE on $TargetInstance. Run: GRANT VIEW ANY DATABASE TO [sqlsentinel];"
+            }
+
             $volumeQuery = @"
 ;WITH VolumeData AS
 (
@@ -332,6 +361,11 @@ ORDER BY TotalSizeGB DESC, d.name;
 
             Write-Info ("Returned volumes from {0}: {1}" -f $TargetInstance, $volumeRows.Count)
             Write-Info ("Returned databases from {0}: {1}" -f $TargetInstance, $databaseRows.Count)
+
+            if ($volumeRows.Count -eq 0 -and $databaseRows.Count -eq 0) {
+                throw "Storage collector returned no volume or database rows from $TargetInstance."
+            }
+
 
             $metricRows = New-Object 'System.Collections.Generic.List[string]'
 
