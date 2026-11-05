@@ -1,6 +1,7 @@
 <#
 ===============================================================================
  SQLSentinel - Storage & Capacity Collector
+ One row per database and one row per volume per collection.
 ===============================================================================
 #>
 
@@ -127,7 +128,7 @@ function Convert-ToSqlNumber {
     )
 }
 
-function Write-MetricBatch {
+function Write-DatabaseCapacityBatch {
     param(
         [string]$CentralSqlInstance,
         [string]$CentralDatabase,
@@ -142,30 +143,59 @@ function Write-MetricBatch {
 
     $valuesText = $Rows -join ", "
 
-    $query = @"
-INSERT INTO dbo.MetricSnapshot
+    Invoke-SentinelQuery `
+        -SqlInstance $CentralSqlInstance `
+        -Database $CentralDatabase `
+        -SqlCredential $SqlCredential `
+        -Query @"
+INSERT INTO dbo.DatabaseCapacitySnapshot
 (
     InstanceId,
     CaptureTime,
     DatabaseName,
-    ObjectName,
-    CounterName,
-    InstanceName,
-    MetricCategory,
-    MetricValue,
-    MetricType,
-    Unit,
-    SourceCollector
+    DataSizeGB,
+    LogSizeGB,
+    TotalSizeGB
 )
 VALUES
 $valuesText;
-"@
+"@ `
+        -QueryTimeout $QueryTimeout | Out-Null
+}
+
+function Write-VolumeCapacityBatch {
+    param(
+        [string]$CentralSqlInstance,
+        [string]$CentralDatabase,
+        [pscredential]$SqlCredential,
+        [int]$QueryTimeout,
+        [System.Collections.Generic.List[string]]$Rows
+    )
+
+    if ($Rows.Count -eq 0) {
+        return
+    }
+
+    $valuesText = $Rows -join ", "
 
     Invoke-SentinelQuery `
         -SqlInstance $CentralSqlInstance `
         -Database $CentralDatabase `
         -SqlCredential $SqlCredential `
-        -Query $query `
+        -Query @"
+INSERT INTO dbo.VolumeCapacitySnapshot
+(
+    InstanceId,
+    CaptureTime,
+    VolumeName,
+    TotalGB,
+    UsedGB,
+    FreeGB,
+    FreePercent
+)
+VALUES
+$valuesText;
+"@ `
         -QueryTimeout $QueryTimeout | Out-Null
 }
 
@@ -201,7 +231,7 @@ try {
         }
     }
 
-    if ($DatabaseBatchSize -lt 1 -or $DatabaseBatchSize -gt 300) {
+    if ($DatabaseBatchSize -lt 1 -or $DatabaseBatchSize -gt 500) {
         $DatabaseBatchSize = 300
     }
 
@@ -271,11 +301,11 @@ SELECT
             }
 
             if ([int]$permissionResult.HasViewAnyDefinition -ne 1) {
-                throw "sqlsentinel is missing VIEW ANY DEFINITION on $TargetInstance. Run: GRANT VIEW ANY DEFINITION TO [sqlsentinel];"
+                throw "sqlsentinel is missing VIEW ANY DEFINITION on $TargetInstance."
             }
 
             if ([int]$permissionResult.HasViewAnyDatabase -ne 1) {
-                throw "sqlsentinel is missing VIEW ANY DATABASE on $TargetInstance. Run: GRANT VIEW ANY DATABASE TO [sqlsentinel];"
+                throw "sqlsentinel is missing VIEW ANY DATABASE on $TargetInstance."
             }
 
             $volumeQuery = @"
@@ -366,11 +396,9 @@ ORDER BY TotalSizeGB DESC, d.name;
                 throw "Storage collector returned no volume or database rows from $TargetInstance."
             }
 
-
-            $metricRows = New-Object 'System.Collections.Generic.List[string]'
+            $volumeInsertRows = New-Object 'System.Collections.Generic.List[string]'
 
             foreach ($row in $volumeRows) {
-
                 $volumeName = if ([string]::IsNullOrWhiteSpace([string]$row.VolumeName)) {
                     "(unknown)"
                 }
@@ -380,38 +408,26 @@ ORDER BY TotalSizeGB DESC, d.name;
 
                 $safeVolumeName = $volumeName.Replace("'", "''")
 
-                $volumeMetrics = @(
-                    @{ CounterName = "TotalGB"; Value = $row.TotalGB; Unit = "GB" },
-                    @{ CounterName = "UsedGB"; Value = $row.UsedGB; Unit = "GB" },
-                    @{ CounterName = "FreeGB"; Value = $row.FreeGB; Unit = "GB" },
-                    @{ CounterName = "FreePercent"; Value = $row.FreePercent; Unit = "percent" }
+                $volumeInsertRows.Add(
+                    "($InstanceId, '$captureTime', N'$safeVolumeName', $(Convert-ToSqlNumber $row.TotalGB), $(Convert-ToSqlNumber $row.UsedGB), $(Convert-ToSqlNumber $row.FreeGB), $(Convert-ToSqlNumber $row.FreePercent))"
                 )
-
-                foreach ($metric in $volumeMetrics) {
-                    $value = Convert-ToSqlNumber $metric.Value
-
-                    $metricRows.Add(
-                        "($InstanceId, '$captureTime', NULL, N'StorageVolume', N'$($metric.CounterName)', N'$safeVolumeName', N'StorageVolume', $value, N'Gauge', N'$($metric.Unit)', N'$CollectorName')"
-                    )
-                }
             }
 
-            if ($metricRows.Count -gt 0) {
-                Write-MetricBatch `
+            if ($volumeInsertRows.Count -gt 0) {
+                Write-VolumeCapacityBatch `
                     -CentralSqlInstance $CentralSqlInstance `
                     -CentralDatabase $CentralDatabase `
                     -SqlCredential $SqlCredential `
                     -QueryTimeout $QueryTimeout `
-                    -Rows $metricRows
+                    -Rows $volumeInsertRows
 
-                $RowsCollected += $metricRows.Count
-                $metricRows.Clear()
+                $RowsCollected += $volumeInsertRows.Count
             }
 
+            $databaseInsertRows = New-Object 'System.Collections.Generic.List[string]'
             $databasesInBatch = 0
 
             foreach ($row in $databaseRows) {
-
                 $databaseName = if ([string]::IsNullOrWhiteSpace([string]$row.DatabaseName)) {
                     "(unknown)"
                 }
@@ -421,46 +437,35 @@ ORDER BY TotalSizeGB DESC, d.name;
 
                 $safeDatabaseName = $databaseName.Replace("'", "''")
 
-                $databaseMetrics = @(
-                    @{ CounterName = "DataSizeGB"; Value = $row.DataSizeGB },
-                    @{ CounterName = "LogSizeGB"; Value = $row.LogSizeGB },
-                    @{ CounterName = "TotalSizeGB"; Value = $row.TotalSizeGB }
+                $databaseInsertRows.Add(
+                    "($InstanceId, '$captureTime', N'$safeDatabaseName', $(Convert-ToSqlNumber $row.DataSizeGB), $(Convert-ToSqlNumber $row.LogSizeGB), $(Convert-ToSqlNumber $row.TotalSizeGB))"
                 )
-
-                foreach ($metric in $databaseMetrics) {
-                    $value = Convert-ToSqlNumber $metric.Value
-
-                    $metricRows.Add(
-                        "($InstanceId, '$captureTime', N'$safeDatabaseName', N'DatabaseSize', N'$($metric.CounterName)', NULL, N'DatabaseSize', $value, N'Gauge', N'GB', N'$CollectorName')"
-                    )
-                }
 
                 $databasesInBatch++
 
                 if ($databasesInBatch -ge $DatabaseBatchSize) {
-                    Write-MetricBatch `
+                    Write-DatabaseCapacityBatch `
                         -CentralSqlInstance $CentralSqlInstance `
                         -CentralDatabase $CentralDatabase `
                         -SqlCredential $SqlCredential `
                         -QueryTimeout $QueryTimeout `
-                        -Rows $metricRows
+                        -Rows $databaseInsertRows
 
-                    $RowsCollected += $metricRows.Count
-                    $metricRows.Clear()
+                    $RowsCollected += $databaseInsertRows.Count
+                    $databaseInsertRows.Clear()
                     $databasesInBatch = 0
                 }
             }
 
-            if ($metricRows.Count -gt 0) {
-                Write-MetricBatch `
+            if ($databaseInsertRows.Count -gt 0) {
+                Write-DatabaseCapacityBatch `
                     -CentralSqlInstance $CentralSqlInstance `
                     -CentralDatabase $CentralDatabase `
                     -SqlCredential $SqlCredential `
                     -QueryTimeout $QueryTimeout `
-                    -Rows $metricRows
+                    -Rows $databaseInsertRows
 
-                $RowsCollected += $metricRows.Count
-                $metricRows.Clear()
+                $RowsCollected += $databaseInsertRows.Count
             }
 
             Complete-CollectionRun `
