@@ -129,7 +129,7 @@ try {
     $CentralDatabase = $config.CentralDatabase
 
     $QueryTimeout = 120
-    $MaximumFiles = 25
+    $MaximumFiles = 10
 
     if ($null -ne $config.Collectors -and
         $config.Collectors.PSObject.Properties.Name -contains "DatabaseIO") {
@@ -197,11 +197,6 @@ ORDER BY InstanceName;
         CaptureTime = SYSDATETIME(),
         DatabaseName = d.name,
         LogicalFileName = CONCAT('file_id_', vfs.file_id),
-        PhysicalName = '(unavailable)',
-        DriveLetter = '(unknown)',
-        FileType = 'UNKNOWN',
-        FileSizeMB = CAST(0 AS decimal(19,2)),
-        FileSizeGB = CAST(0 AS decimal(19,2)),
         NumReads = CAST(ISNULL(vfs.num_of_reads, 0) AS decimal(19,2)),
         NumWrites = CAST(ISNULL(vfs.num_of_writes, 0) AS decimal(19,2)),
         TotalIO = CAST(ISNULL(vfs.num_of_reads, 0) + ISNULL(vfs.num_of_writes, 0) AS decimal(19,2)),
@@ -245,11 +240,6 @@ SELECT TOP ($MaximumFiles)
     CaptureTime,
     DatabaseName,
     LogicalFileName,
-    PhysicalName,
-    DriveLetter,
-    FileType,
-    FileSizeMB,
-    FileSizeGB,
     NumReads,
     NumWrites,
     TotalIO,
@@ -282,25 +272,20 @@ ORDER BY
 
             $captureTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
+            $metricValueRows = New-Object 'System.Collections.Generic.List[string]'
+            $detailValueRows = New-Object 'System.Collections.Generic.List[string]'
+
             foreach ($row in $ioRows) {
 
                 $safeDatabaseName = if ([string]::IsNullOrWhiteSpace([string]$row.DatabaseName)) { "(unknown)" } else { [string]$row.DatabaseName }
                 $safeLogicalFileName = if ([string]::IsNullOrWhiteSpace([string]$row.LogicalFileName)) { "(unknown)" } else { [string]$row.LogicalFileName }
-                $safePhysicalName = if ([string]::IsNullOrWhiteSpace([string]$row.PhysicalName)) { "(unknown)" } else { [string]$row.PhysicalName }
-                $safeDriveLetter = if ([string]::IsNullOrWhiteSpace([string]$row.DriveLetter)) { "(unknown)" } else { [string]$row.DriveLetter }
 
                 $safeDatabaseName = $safeDatabaseName.Replace("'", "''")
                 $safeLogicalFileName = $safeLogicalFileName.Replace("'", "''")
-                $safePhysicalName = $safePhysicalName.Replace("'", "''")
-                $safeDriveLetter = $safeDriveLetter.Replace("'", "''")
 
                 $detailText = @"
 DatabaseName: $safeDatabaseName
 LogicalFileName: $safeLogicalFileName
-PhysicalName: $safePhysicalName
-DriveLetter: $safeDriveLetter
-FileType: $($row.FileType)
-FileSizeGB: $($row.FileSizeGB)
 TotalIO: $($row.TotalIO)
 AvgReadLatencyMs: $($row.AvgReadLatencyMs)
 AvgWriteLatencyMs: $($row.AvgWriteLatencyMs)
@@ -310,8 +295,6 @@ AvgIoLatencyMs: $($row.AvgIoLatencyMs)
                 $safeDetails = $detailText.Replace("'", "''")
 
                 $metrics = @(
-                    @{ CounterName = "FileSizeMB"; Value = [decimal]$row.FileSizeMB; Unit = "MB" },
-                    @{ CounterName = "FileSizeGB"; Value = [decimal]$row.FileSizeGB; Unit = "GB" },
                     @{ CounterName = "NumReads"; Value = [decimal]$row.NumReads; Unit = "count" },
                     @{ CounterName = "NumWrites"; Value = [decimal]$row.NumWrites; Unit = "count" },
                     @{ CounterName = "TotalIO"; Value = [decimal]$row.TotalIO; Unit = "count" },
@@ -326,12 +309,46 @@ AvgIoLatencyMs: $($row.AvgIoLatencyMs)
                 )
 
                 foreach ($metric in $metrics) {
+                    $valueText = ([decimal]$metric.Value).ToString(
+                        [System.Globalization.CultureInfo]::InvariantCulture
+                    )
 
-                    Invoke-SentinelQuery `
-                        -SqlInstance $CentralSqlInstance `
-                        -Database $CentralDatabase `
-                        -SqlCredential $SqlCredential `
-                        -Query @"
+                    $metricValueRows.Add(
+                        "($InstanceId, '$captureTime', N'$safeDatabaseName', N'DatabaseFileIO', N'$($metric.CounterName)', N'$safeLogicalFileName', N'DatabaseIO', $valueText, N'Cumulative', N'$($metric.Unit)', N'$CollectorName')"
+                    )
+                }
+
+                $severity =
+                    if ([decimal]$row.AvgWriteLatencyMs -ge 20 -or [decimal]$row.AvgReadLatencyMs -ge 20) {
+                        "Critical"
+                    }
+                    elseif ([decimal]$row.AvgWriteLatencyMs -ge 10 -or [decimal]$row.AvgReadLatencyMs -ge 10) {
+                        "Warning"
+                    }
+                    else {
+                        "Info"
+                    }
+
+                $avgIoText = ([decimal]$row.AvgIoLatencyMs).ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                )
+                $totalIoText = ([decimal]$row.TotalIO).ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                )
+
+                $detailValueRows.Add(
+                    "($InstanceId, '$captureTime', N'$safeDatabaseName', N'DatabaseIO', N'DatabaseFileIODetail', N'$severity', $avgIoText, $totalIoText, N'$safeDetails', N'$CollectorName')"
+                )
+            }
+
+            if ($metricValueRows.Count -gt 0) {
+                $metricValues = $metricValueRows -join ", "
+
+                Invoke-SentinelQuery `
+                    -SqlInstance $CentralSqlInstance `
+                    -Database $CentralDatabase `
+                    -SqlCredential $SqlCredential `
+                    -Query @"
 INSERT INTO dbo.MetricSnapshot
 (
     InstanceId,
@@ -347,35 +364,15 @@ INSERT INTO dbo.MetricSnapshot
     SourceCollector
 )
 VALUES
-(
-    $InstanceId,
-    '$captureTime',
-    N'$safeDatabaseName',
-    'DatabaseFileIO',
-    '$($metric.CounterName)',
-    N'$safeLogicalFileName',
-    'DatabaseIO',
-    $($metric.Value),
-    'Cumulative',
-    '$($metric.Unit)',
-    '$CollectorName'
-);
+$metricValues;
 "@ `
-                        -QueryTimeout $QueryTimeout | Out-Null
+                    -QueryTimeout $QueryTimeout | Out-Null
 
-                    $RowsCollected++
-                }
+                $RowsCollected += $metricValueRows.Count
+            }
 
-                $severity =
-                    if ([decimal]$row.AvgWriteLatencyMs -ge 20 -or [decimal]$row.AvgReadLatencyMs -ge 20) {
-                        "Critical"
-                    }
-                    elseif ([decimal]$row.AvgWriteLatencyMs -ge 10 -or [decimal]$row.AvgReadLatencyMs -ge 10) {
-                        "Warning"
-                    }
-                    else {
-                        "Info"
-                    }
+            if ($detailValueRows.Count -gt 0) {
+                $detailValues = $detailValueRows -join ", "
 
                 Invoke-SentinelQuery `
                     -SqlInstance $CentralSqlInstance `
@@ -396,22 +393,11 @@ INSERT INTO dbo.MetricTextSnapshot
     SourceCollector
 )
 VALUES
-(
-    $InstanceId,
-    '$captureTime',
-    N'$safeDatabaseName',
-    'DatabaseIO',
-    'DatabaseFileIODetail',
-    '$severity',
-    $([decimal]$row.AvgIoLatencyMs),
-    $([decimal]$row.TotalIO),
-    N'$safeDetails',
-    '$CollectorName'
-);
+$detailValues;
 "@ `
                     -QueryTimeout $QueryTimeout | Out-Null
 
-                $RowsCollected++
+                $RowsCollected += $detailValueRows.Count
             }
 
             Complete-CollectionRun `
