@@ -329,7 +329,8 @@ SELECT
             )
     FROM sys.master_files AS mf
     CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) AS vs
-    WHERE vs.volume_mount_point IS NOT NULL
+    WHERE mf.database_id > 4
+      AND vs.volume_mount_point IS NOT NULL
 )
 SELECT
     VolumeName,
