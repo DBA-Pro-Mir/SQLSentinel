@@ -6,6 +6,13 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# SQLSentinel runs against internal SQL Servers whose TLS certificates may not
+# chain to a CA trusted by the SQL Server Agent service account. Keep encryption
+# enabled, but trust the server certificate for this PowerShell session.
+Import-Module dbatools -ErrorAction Stop
+Set-DbatoolsConfig -FullName 'sql.connection.trustcert' -Value $true
+
+
 $Collectors = @(
     ".\Collectors\Collect-PerformanceCounters.ps1",
     ".\Collectors\Collect-DatabaseIO.ps1",
@@ -154,3 +161,9 @@ Write-Host ("Finished  : {0:yyyy-MM-dd HH:mm:ss}" -f $RunEndTime) -ForegroundCol
 Write-Host ("Duration  : {0}" -f $RunDuration.ToString("hh\:mm\:ss")) -ForegroundColor Cyan
 Write-Host ("Succeeded : {0}" -f $Success) -ForegroundColor Green
 Write-Host ("Failed    : {0}" -f $Failed) -ForegroundColor Yellow
+
+
+if ($Failed -gt 0)
+{
+    throw "One or more SQLSentinel collectors failed. Failed collectors: $Failed"
+}
