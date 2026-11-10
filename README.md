@@ -124,6 +124,9 @@ QueryStats V2 uses a bounded candidate model to collect top CPU, duration, logic
 
 - [Instance Management Runbook](Docs/Operations/InstanceManagement.md)
 - [Monitored Instance Registration](Docs/Operations/Registration.md)
+- [Collector Operations Runbook](Docs/Operations/CollectorOperations.md)
+- [Reporting and Repository Retention](Docs/Operations/ReportingAndRetention.md)
+- [SQLSentinel Automation Schedule](Docs/Operations/AutomationSchedule.md)
 
 ### Architecture
 
