@@ -394,7 +394,27 @@ ORDER BY TotalSizeGB DESC, d.name;
             Write-Info ("Returned databases from {0}: {1}" -f $TargetInstance, $databaseRows.Count)
 
             if ($volumeRows.Count -eq 0 -and $databaseRows.Count -eq 0) {
-                throw "Storage collector returned no volume or database rows from $TargetInstance."
+                $userDatabaseCount = [int](
+                    Invoke-SentinelQuery `
+                        -SqlInstance $TargetInstance `
+                        -Database master `
+                        -SqlCredential $SqlCredential `
+                        -Query @"
+SELECT COUNT_BIG(*)
+FROM sys.databases
+WHERE database_id > 4
+  AND source_database_id IS NULL;
+"@ `
+                        -QueryTimeout 30 `
+                        -AsSingleValue
+                )
+
+                if ($userDatabaseCount -eq 0) {
+                    Write-Info "$TargetInstance has no user databases. No storage-capacity rows are expected."
+                }
+                else {
+                    throw "Storage collector returned no volume or database rows from $TargetInstance even though $userDatabaseCount user databases exist."
+                }
             }
 
             $volumeInsertRows = New-Object 'System.Collections.Generic.List[string]'
