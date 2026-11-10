@@ -4,20 +4,18 @@
 ===============================================================================
  Run in SQLMonitoring.
 
- Initial retention policy:
-   MetricSnapshot          90 days
-   MetricTextSnapshot      90 days
-   CollectionRunHistory   365 days
+ Current retention policy:
+   MetricSnapshot                 30 days
+   MetricTextSnapshot             60 days
+   CollectionRunHistory           90 days
+   DatabaseCapacitySnapshot       90 days
+   VolumeCapacitySnapshot         90 days
 
  Deletes are intentionally batched to limit transaction log growth, blocking,
- and long-running cleanup transactions. Retention can be tightened later when
- collector frequency increases.
+ and long-running cleanup transactions.
 
- Retention indexes:
-   MetricSnapshot already has IX_MetricSnapshot_CaptureTime.
-   CollectionRunHistory already has IX_CollectionRunHistory_StartedAt.
-   MetricTextSnapshot requires IX_MetricTextSnapshot_CaptureTime and this
-   deployment creates it if it does not already exist.
+ Use @DryRun = 1 before changing retention values or before the first cleanup.
+ Do not shrink SQLMonitoring after cleanup; freed space should be reused.
 ===============================================================================
 */
 SET NOCOUNT ON;
@@ -28,12 +26,6 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'rpt')
     EXEC(N'CREATE SCHEMA rpt AUTHORIZATION dbo;');
 GO
 
-/*
- The cleanup predicate for MetricTextSnapshot is CaptureTime < @TextCutoff.
- A CaptureTime-leading index prevents the weekly purge from having to scan the
- text table as it grows. This index was initially validated manually and is now
- part of the repeatable repository deployment.
-*/
 IF NOT EXISTS
 (
     SELECT 1
@@ -43,111 +35,162 @@ IF NOT EXISTS
 )
 BEGIN
     CREATE NONCLUSTERED INDEX IX_MetricTextSnapshot_CaptureTime
-        ON dbo.MetricTextSnapshot (CaptureTime);
+        ON dbo.MetricTextSnapshot ([CaptureTime]);
 END;
 GO
 
-CREATE OR ALTER PROCEDURE dbo.usp_SQLSentinel_RepositoryCleanup
-    @MetricRetentionDays int = 90,
-    @TextRetentionDays int = 90,
-    @CollectionHistoryRetentionDays int = 365,
-    @BatchSize int = 5000,
-    @DelayMilliseconds int = 100,
-    @MaxBatchesPerTable int = 1000
+CREATE OR ALTER PROCEDURE dbo.usp_SQLSentinelRepositoryCleanup
+(
+    @MetricRetentionDays             int = 30,
+    @TextMetricRetentionDays         int = 60,
+    @CollectionRunRetentionDays      int = 90,
+    @DatabaseCapacityRetentionDays   int = 90,
+    @VolumeCapacityRetentionDays     int = 90,
+    @BatchSize                       int = 10000,
+    @DryRun                          bit = 1
+)
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
-    IF @MetricRetentionDays < 7 OR @TextRetentionDays < 7 OR @CollectionHistoryRetentionDays < 30
+    IF @MetricRetentionDays < 7
+       OR @TextMetricRetentionDays < 7
+       OR @CollectionRunRetentionDays < 30
+       OR @DatabaseCapacityRetentionDays < 30
+       OR @VolumeCapacityRetentionDays < 30
+    BEGIN
         THROW 50020, 'Retention values are below SQLSentinel safety minimums.', 1;
+    END;
 
     IF @BatchSize < 100 OR @BatchSize > 50000
         THROW 50021, 'BatchSize must be between 100 and 50000.', 1;
 
-    IF @MaxBatchesPerTable < 1
-        THROW 50022, 'MaxBatchesPerTable must be at least 1.', 1;
+    DECLARE
+        @MetricCutoff             datetime2(0) = DATEADD(DAY, -@MetricRetentionDays, SYSDATETIME()),
+        @TextMetricCutoff         datetime2(0) = DATEADD(DAY, -@TextMetricRetentionDays, SYSDATETIME()),
+        @CollectionRunCutoff      datetime2(0) = DATEADD(DAY, -@CollectionRunRetentionDays, SYSDATETIME()),
+        @DatabaseCapacityCutoff   datetime2(0) = DATEADD(DAY, -@DatabaseCapacityRetentionDays, SYSDATETIME()),
+        @VolumeCapacityCutoff     datetime2(0) = DATEADD(DAY, -@VolumeCapacityRetentionDays, SYSDATETIME()),
+        @RowsDeleted              int;
 
-    DECLARE @MetricCutoff datetime2 = DATEADD(DAY, -@MetricRetentionDays, SYSDATETIME());
-    DECLARE @TextCutoff datetime2 = DATEADD(DAY, -@TextRetentionDays, SYSDATETIME());
-    DECLARE @HistoryCutoff datetime2 = DATEADD(DAY, -@CollectionHistoryRetentionDays, SYSDATETIME());
-    DECLARE @Rows int;
-    DECLARE @Batch int;
-    DECLARE @Delay time(3) = DATEADD(MILLISECOND, @DelayMilliseconds, CAST('00:00:00.000' AS time(3)));
+    IF @DryRun = 1
+    BEGIN
+        SELECT
+            N'MetricSnapshot' AS [TableName],
+            COUNT_BIG(*) AS [RowsToDelete],
+            @MetricCutoff AS [CutoffDate]
+        FROM dbo.MetricSnapshot
+        WHERE [CaptureTime] < @MetricCutoff
 
-    CREATE TABLE #CleanupSummary
-    (
-        TableName sysname NOT NULL,
-        RowsDeleted bigint NOT NULL,
-        CutoffDate datetime2 NOT NULL
-    );
+        UNION ALL
 
-    DECLARE @Total bigint = 0;
-    SET @Batch = 0;
-    WHILE @Batch < @MaxBatchesPerTable
+        SELECT
+            N'MetricTextSnapshot',
+            COUNT_BIG(*),
+            @TextMetricCutoff
+        FROM dbo.MetricTextSnapshot
+        WHERE [CaptureTime] < @TextMetricCutoff
+
+        UNION ALL
+
+        SELECT
+            N'CollectionRunHistory',
+            COUNT_BIG(*),
+            @CollectionRunCutoff
+        FROM dbo.CollectionRunHistory
+        WHERE [StartedAt] < @CollectionRunCutoff
+
+        UNION ALL
+
+        SELECT
+            N'DatabaseCapacitySnapshot',
+            COUNT_BIG(*),
+            @DatabaseCapacityCutoff
+        FROM dbo.DatabaseCapacitySnapshot
+        WHERE [CaptureTime] < @DatabaseCapacityCutoff
+
+        UNION ALL
+
+        SELECT
+            N'VolumeCapacitySnapshot',
+            COUNT_BIG(*),
+            @VolumeCapacityCutoff
+        FROM dbo.VolumeCapacitySnapshot
+        WHERE [CaptureTime] < @VolumeCapacityCutoff;
+
+        RETURN;
+    END;
+
+    SET @RowsDeleted = 1;
+    WHILE @RowsDeleted > 0
     BEGIN
         DELETE TOP (@BatchSize)
         FROM dbo.MetricSnapshot
-        WHERE CaptureTime < @MetricCutoff;
+        WHERE [CaptureTime] < @MetricCutoff;
 
-        SET @Rows = @@ROWCOUNT;
-        SET @Total += @Rows;
-        SET @Batch += 1;
-        IF @Rows = 0 BREAK;
-        IF @DelayMilliseconds > 0 WAITFOR DELAY @Delay;
+        SET @RowsDeleted = @@ROWCOUNT;
+        IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
     END;
-    INSERT #CleanupSummary VALUES (N'MetricSnapshot', @Total, @MetricCutoff);
 
-    SET @Total = 0;
-    SET @Batch = 0;
-    WHILE @Batch < @MaxBatchesPerTable
+    SET @RowsDeleted = 1;
+    WHILE @RowsDeleted > 0
     BEGIN
         DELETE TOP (@BatchSize)
         FROM dbo.MetricTextSnapshot
-        WHERE CaptureTime < @TextCutoff;
+        WHERE [CaptureTime] < @TextMetricCutoff;
 
-        SET @Rows = @@ROWCOUNT;
-        SET @Total += @Rows;
-        SET @Batch += 1;
-        IF @Rows = 0 BREAK;
-        IF @DelayMilliseconds > 0 WAITFOR DELAY @Delay;
+        SET @RowsDeleted = @@ROWCOUNT;
+        IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
     END;
-    INSERT #CleanupSummary VALUES (N'MetricTextSnapshot', @Total, @TextCutoff);
 
-    SET @Total = 0;
-    SET @Batch = 0;
-    WHILE @Batch < @MaxBatchesPerTable
+    SET @RowsDeleted = 1;
+    WHILE @RowsDeleted > 0
     BEGIN
         DELETE TOP (@BatchSize)
         FROM dbo.CollectionRunHistory
-        WHERE StartedAt < @HistoryCutoff;
+        WHERE [StartedAt] < @CollectionRunCutoff;
 
-        SET @Rows = @@ROWCOUNT;
-        SET @Total += @Rows;
-        SET @Batch += 1;
-        IF @Rows = 0 BREAK;
-        IF @DelayMilliseconds > 0 WAITFOR DELAY @Delay;
+        SET @RowsDeleted = @@ROWCOUNT;
+        IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
     END;
-    INSERT #CleanupSummary VALUES (N'CollectionRunHistory', @Total, @HistoryCutoff);
 
-    SELECT TableName, RowsDeleted, CutoffDate
-    FROM #CleanupSummary
-    ORDER BY TableName;
+    SET @RowsDeleted = 1;
+    WHILE @RowsDeleted > 0
+    BEGIN
+        DELETE TOP (@BatchSize)
+        FROM dbo.DatabaseCapacitySnapshot
+        WHERE [CaptureTime] < @DatabaseCapacityCutoff;
+
+        SET @RowsDeleted = @@ROWCOUNT;
+        IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
+    END;
+
+    SET @RowsDeleted = 1;
+    WHILE @RowsDeleted > 0
+    BEGIN
+        DELETE TOP (@BatchSize)
+        FROM dbo.VolumeCapacitySnapshot
+        WHERE [CaptureTime] < @VolumeCapacityCutoff;
+
+        SET @RowsDeleted = @@ROWCOUNT;
+        IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
+    END;
 END;
 GO
 
 CREATE OR ALTER VIEW rpt.vw_RepositoryHealth
 AS
 SELECT
-    DatabaseName = DB_NAME(),
-    DataSizeMB = CAST(SUM(CASE WHEN df.type = 0 THEN df.size ELSE 0 END) * 8.0 / 1024.0 AS decimal(19,2)),
-    LogSizeMB = CAST(SUM(CASE WHEN df.type = 1 THEN df.size ELSE 0 END) * 8.0 / 1024.0 AS decimal(19,2)),
-    TotalAllocatedMB = CAST(SUM(df.size) * 8.0 / 1024.0 AS decimal(19,2)),
-    DataFileCount = SUM(CASE WHEN df.type = 0 THEN 1 ELSE 0 END),
-    LogFileCount = SUM(CASE WHEN df.type = 1 THEN 1 ELSE 0 END),
-    CaptureTime = SYSDATETIME()
+    [DatabaseName] = DB_NAME(),
+    [DataSizeMB] = CAST(SUM(CASE WHEN df.[type] = 0 THEN df.[size] ELSE 0 END) * 8.0 / 1024.0 AS decimal(19,2)),
+    [LogSizeMB] = CAST(SUM(CASE WHEN df.[type] = 1 THEN df.[size] ELSE 0 END) * 8.0 / 1024.0 AS decimal(19,2)),
+    [TotalAllocatedMB] = CAST(SUM(df.[size]) * 8.0 / 1024.0 AS decimal(19,2)),
+    [DataFileCount] = SUM(CASE WHEN df.[type] = 0 THEN 1 ELSE 0 END),
+    [LogFileCount] = SUM(CASE WHEN df.[type] = 1 THEN 1 ELSE 0 END),
+    [CaptureTime] = SYSDATETIME()
 FROM sys.database_files AS df;
 GO
 
-PRINT 'SQLSentinel repository maintenance objects and retention indexes created/updated successfully.';
+PRINT 'SQLSentinel repository maintenance objects created/updated successfully.';
 GO
