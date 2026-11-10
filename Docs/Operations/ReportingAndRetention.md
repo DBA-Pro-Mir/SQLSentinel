@@ -73,15 +73,17 @@ Do not grant broad write access to the repository and avoid granting Power BI di
 
 ## Retention policy
 
-Initial policy while collectors run approximately twice daily:
+Current production policy:
 
 | Data | Retention |
 | --- | ---: |
-| `MetricSnapshot` | 90 days |
-| `MetricTextSnapshot` | 90 days |
-| `CollectionRunHistory` | 365 days |
+| `MetricSnapshot` | 30 days |
+| `MetricTextSnapshot` | 60 days |
+| `CollectionRunHistory` | 90 days |
+| `DatabaseCapacitySnapshot` | 90 days |
+| `VolumeCapacitySnapshot` | 90 days |
 
-The policy should be reviewed when collector frequency increases. Raw/high-volume data can use shorter retention while summarized operational history can remain longer.
+The policy reflects the higher collector frequency and the large monitored database estate. Raw high-volume metrics use shorter retention while daily capacity snapshots are retained longer for trend analysis.
 
 ## Repository cleanup
 
@@ -94,34 +96,37 @@ Database/Maintenance/001_Create_Repository_Maintenance.sql
 This creates:
 
 ```text
-dbo.usp_SQLSentinel_RepositoryCleanup
+dbo.usp_SQLSentinelRepositoryCleanup
 rpt.vw_RepositoryHealth
 ```
 
 The cleanup procedure performs batched deletes to reduce transaction log pressure and long blocking transactions.
 
-Default execution:
+Dry-run validation:
 
 ```sql
-EXEC dbo.usp_SQLSentinel_RepositoryCleanup;
+EXEC dbo.usp_SQLSentinelRepositoryCleanup
+    @DryRun = 1;
 ```
 
-Explicit example:
+Scheduled execution:
 
 ```sql
-EXEC dbo.usp_SQLSentinel_RepositoryCleanup
-    @MetricRetentionDays = 90,
-    @TextRetentionDays = 90,
-    @CollectionHistoryRetentionDays = 365,
-    @BatchSize = 5000,
-    @DelayMilliseconds = 100;
+EXEC dbo.usp_SQLSentinelRepositoryCleanup
+    @MetricRetentionDays = 30,
+    @TextMetricRetentionDays = 60,
+    @CollectionRunRetentionDays = 90,
+    @DatabaseCapacityRetentionDays = 90,
+    @VolumeCapacityRetentionDays = 90,
+    @BatchSize = 10000,
+    @DryRun = 0;
 ```
 
-Review the returned row counts before changing retention values.
+Always use dry-run mode before materially changing retention values.
 
 ## Scheduling maintenance
 
-After the initial manual validation, schedule `dbo.usp_SQLSentinel_RepositoryCleanup` as a SQL Agent job on the SQLMonitoring repository server. Weekly execution is sufficient at the current twice-daily collection frequency. Increase frequency if collection volume grows materially.
+After the initial manual validation, schedule `dbo.usp_SQLSentinelRepositoryCleanup` as a SQL Agent job on the SQLMonitoring repository server. With the current every-three-hours operational collection schedule, run cleanup once daily in a separate maintenance window.
 
 Do not schedule cleanup at the same time as the main collector run or Power BI import refresh.
 
