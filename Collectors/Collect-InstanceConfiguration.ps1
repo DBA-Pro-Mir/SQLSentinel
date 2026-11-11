@@ -118,6 +118,15 @@ VALUES
 "@ | Out-Null
         $RowsCollected++
 
+        Invoke-SentinelQuery -SqlInstance $CentralSqlInstance -Database $CentralDatabase -SqlCredential $SqlCredential -Query @"
+UPDATE dbo.MonitoredInstances
+SET
+    [SqlVersion] = N'$safeProductVersion',
+    [Edition] = N'$safeEdition',
+    [ModifiedAt] = SYSDATETIME()
+WHERE [InstanceId] = $InstanceId;
+"@ | Out-Null
+
         if ($configRows.Count -gt 0) {
             $values = New-Object 'System.Collections.Generic.List[string]'
             foreach ($row in $configRows) {
