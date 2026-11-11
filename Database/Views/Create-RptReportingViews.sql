@@ -3114,3 +3114,61 @@ GROUP BY
     icc.InstanceName,
     icc.EnvironmentName;
 GO
+
+
+/*=============================================================================
+  Server Inventory Current
+  Consolidates current database inventory, SQL version, and configuration
+  compliance into a single Power BI-friendly reporting view.
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_ServerInventoryCurrent
+AS
+SELECT
+    shs.[InstanceId],
+    shs.[InstanceName],
+    shs.[EnvironmentName],
+
+    di.[TotalUserDatabases],
+    di.[OnlineUserDatabases],
+    di.[OfflineUserDatabases],
+
+    iv.[ProductVersion],
+    iv.[ProductLevel],
+    iv.[Edition],
+    iv.[ProductUpdateLevel],
+    iv.[ProductUpdateReference],
+    iv.[GlobalTraceFlags],
+
+    cs.[SettingCount],
+    cs.[CompliantSettingCount],
+    cs.[NonCompliantSettingCount],
+    cs.[ConfigurationHealth],
+
+    CASE
+        WHEN di.[CaptureTime] IS NULL
+         AND iv.[CaptureTime] IS NULL
+         AND cs.[CaptureTime] IS NULL
+            THEN NULL
+
+        WHEN ISNULL(di.[CaptureTime], CONVERT(datetime2(0),'19000101')) >=
+             ISNULL(iv.[CaptureTime], CONVERT(datetime2(0),'19000101'))
+         AND ISNULL(di.[CaptureTime], CONVERT(datetime2(0),'19000101')) >=
+             ISNULL(cs.[CaptureTime], CONVERT(datetime2(0),'19000101'))
+            THEN di.[CaptureTime]
+
+        WHEN ISNULL(iv.[CaptureTime], CONVERT(datetime2(0),'19000101')) >=
+             ISNULL(di.[CaptureTime], CONVERT(datetime2(0),'19000101'))
+         AND ISNULL(iv.[CaptureTime], CONVERT(datetime2(0),'19000101')) >=
+             ISNULL(cs.[CaptureTime], CONVERT(datetime2(0),'19000101'))
+            THEN iv.[CaptureTime]
+
+        ELSE cs.[CaptureTime]
+    END AS [LatestCaptureTime]
+FROM rpt.vw_ServerHealthScorecard AS shs
+LEFT JOIN rpt.vw_DatabaseInventoryCurrent AS di
+    ON di.[InstanceId] = shs.[InstanceId]
+LEFT JOIN rpt.vw_InstanceVersionCurrent AS iv
+    ON iv.[InstanceId] = shs.[InstanceId]
+LEFT JOIN rpt.vw_InstanceConfigurationSummaryCurrent AS cs
+    ON cs.[InstanceId] = shs.[InstanceId];
+GO
