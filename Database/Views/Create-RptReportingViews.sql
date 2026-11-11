@@ -498,6 +498,8 @@ BackupSummary AS
                  THEN ms.MetricValue END) AS DatabasesWithoutFullBackup,
         MAX(CASE WHEN ms.CounterName = N'DatabasesWithOldFullBackup'
                  THEN ms.MetricValue END) AS DatabasesWithOldFullBackup,
+        MAX(CASE WHEN ms.CounterName = N'DatabasesWithoutRequiredDiffBackup'
+                 THEN ms.MetricValue END) AS DatabasesWithoutRequiredDiffBackup,
         MAX(CASE WHEN ms.CounterName = N'DatabasesWithOldDiffBackup'
                  THEN ms.MetricValue END) AS DatabasesWithOldDiffBackup,
         MAX(CASE WHEN ms.CounterName = N'RecoveryModelViolations'
@@ -530,6 +532,7 @@ SELECT
     bs.DatabaseCount,
     bs.DatabasesWithoutFullBackup,
     bs.DatabasesWithOldFullBackup,
+    bs.DatabasesWithoutRequiredDiffBackup,
     bs.DatabasesWithOldDiffBackup,
     bs.RecoveryModelViolations,
     bs.DatabasesWithoutRequiredLogBackup,
@@ -540,6 +543,7 @@ SELECT
     BackupProtectionIssueCount =
           ISNULL(bs.DatabasesWithoutFullBackup,0)
         + ISNULL(bs.DatabasesWithOldFullBackup,0)
+        + ISNULL(bs.DatabasesWithoutRequiredDiffBackup,0)
         + ISNULL(bs.DatabasesWithOldDiffBackup,0)
         + ISNULL(bs.DatabasesWithoutRequiredLogBackup,0)
         + ISNULL(bs.DatabasesWithOldRequiredLogBackup,0),
@@ -550,6 +554,7 @@ SELECT
             WHEN bs.InstanceId IS NULL THEN N'Unknown'
             WHEN ISNULL(bs.DatabasesWithoutFullBackup,0) > 0
               OR ISNULL(bs.DatabasesWithOldFullBackup,0) > 0
+              OR ISNULL(bs.DatabasesWithoutRequiredDiffBackup,0) > 0
               OR ISNULL(bs.DatabasesWithOldDiffBackup,0) > 0
               OR ISNULL(bs.DatabasesWithoutRequiredLogBackup,0) > 0
               OR ISNULL(bs.DatabasesWithOldRequiredLogBackup,0) > 0
