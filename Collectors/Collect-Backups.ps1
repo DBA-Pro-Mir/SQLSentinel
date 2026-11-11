@@ -180,6 +180,11 @@ DECLARE @ExpectedRecoveryModel varchar(20) =
         WHEN @ComplianceProfile = 'V2_FULL' THEN 'FULL'
         ELSE 'SIMPLE'
     END;
+DECLARE @RequiresDiffBackups bit =
+    CASE
+        WHEN @ComplianceProfile = 'V1_SIMPLE' THEN 1
+        ELSE 0
+    END;
 DECLARE @RequiresLogBackups bit =
     CASE
         WHEN @ComplianceProfile = 'V2_FULL' THEN 1
@@ -215,6 +220,7 @@ SELECT
     d.state_desc,
     ComplianceProfile = @ComplianceProfile,
     ExpectedRecoveryModel = @ExpectedRecoveryModel,
+    RequiresDiffBackups = @RequiresDiffBackups,
     RequiresLogBackups = @RequiresLogBackups,
     LastFullBackupTime = MAX(CASE WHEN lb.type = 'D' AND lb.rn = 1 THEN lb.backup_finish_date END),
     LastDiffBackupTime = MAX(CASE WHEN lb.type = 'I' AND lb.rn = 1 THEN lb.backup_finish_date END),
@@ -251,8 +257,10 @@ SELECT
         ISNULL(SUM(CASE WHEN LastFullBackupTime IS NULL THEN 1 ELSE 0 END), 0),
     DatabasesWithOldFullBackup =
         ISNULL(SUM(CASE WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 1 ELSE 0 END), 0),
+    DatabasesWithoutRequiredDiffBackup =
+        ISNULL(SUM(CASE WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 1 ELSE 0 END), 0),
     DatabasesWithOldDiffBackup =
-        ISNULL(SUM(CASE WHEN LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 1 ELSE 0 END), 0),
+        ISNULL(SUM(CASE WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 1 ELSE 0 END), 0),
     RecoveryModelViolations =
         ISNULL(SUM(CASE WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1 ELSE 0 END), 0),
     DatabasesWithoutRequiredLogBackup =
@@ -264,6 +272,8 @@ SELECT
             WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1
             WHEN LastFullBackupTime IS NULL THEN 1
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 1
+            WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 1
+            WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 1
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 1
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 1
             ELSE 0
@@ -279,6 +289,7 @@ SELECT TOP ($MaximumDetailRows)
     recovery_model_desc,
     ComplianceProfile,
     ExpectedRecoveryModel,
+    RequiresDiffBackups,
     RequiresLogBackups,
     LastFullBackupTime,
     LastDiffBackupTime,
@@ -300,6 +311,8 @@ SELECT TOP ($MaximumDetailRows)
             WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 'RecoveryModelMismatch'
             WHEN LastFullBackupTime IS NULL THEN 'MissingFullBackup'
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'OldFullBackup'
+            WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 'MissingDiffBackup'
+            WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 'OldDiffBackup'
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'MissingLogBackup'
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'OldLogBackup'
             ELSE 'OK'
@@ -309,6 +322,8 @@ SELECT TOP ($MaximumDetailRows)
             WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 'Critical'
             WHEN LastFullBackupTime IS NULL THEN 'Critical'
             WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'Warning'
+            WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 'Critical'
+            WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 'Warning'
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'Critical'
             WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'Critical'
             ELSE 'Info'
@@ -318,15 +333,19 @@ WHERE
     recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT
     OR LastFullBackupTime IS NULL
     OR LastFullBackupAgeHours > $FullBackupWarningHours
+    OR (RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL)
+    OR (RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours)
     OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL)
     OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours)
 ORDER BY
     CASE
         WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1
         WHEN LastFullBackupTime IS NULL THEN 2
-        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 3
-        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 4
-        WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 5
+        WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 3
+        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 4
+        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 5
+        WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 6
+        WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 7
         ELSE 99
     END,
     DatabaseName;
@@ -360,6 +379,7 @@ DROP TABLE #BackupStatus;
                 @{ Name = "DatabaseCount"; Value = [decimal]$summary.DatabaseCount; Unit = "count" },
                 @{ Name = "DatabasesWithoutFullBackup"; Value = [decimal]$summary.DatabasesWithoutFullBackup; Unit = "count" },
                 @{ Name = "DatabasesWithOldFullBackup"; Value = [decimal]$summary.DatabasesWithOldFullBackup; Unit = "count" },
+                @{ Name = "DatabasesWithoutRequiredDiffBackup"; Value = [decimal]$summary.DatabasesWithoutRequiredDiffBackup; Unit = "count" },
                 @{ Name = "DatabasesWithOldDiffBackup"; Value = [decimal]$summary.DatabasesWithOldDiffBackup; Unit = "count" },
                 @{ Name = "RecoveryModelViolations"; Value = [decimal]$summary.RecoveryModelViolations; Unit = "count" },
                 @{ Name = "DatabasesWithoutRequiredLogBackup"; Value = [decimal]$summary.DatabasesWithoutRequiredLogBackup; Unit = "count" },
@@ -423,6 +443,7 @@ Severity: $severity
 ComplianceProfile: $($issue.ComplianceProfile)
 ExpectedRecoveryModel: $($issue.ExpectedRecoveryModel)
 ActualRecoveryModel: $($issue.recovery_model_desc)
+RequiresDiffBackups: $($issue.RequiresDiffBackups)
 RequiresLogBackups: $($issue.RequiresLogBackups)
 LastFullBackupTime: $($issue.LastFullBackupTime)
 LastDiffBackupTime: $($issue.LastDiffBackupTime)
