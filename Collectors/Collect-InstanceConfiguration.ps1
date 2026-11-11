@@ -149,7 +149,7 @@ WHERE [CollectionRunId]=$CollectionRunId;
     }
     catch {
         $err = $_.Exception.Message
-        Write-Fail "Failed for $TargetInstance: $err"
+        Write-Fail "Failed for ${TargetInstance}: $err"
         if ($null -ne $CollectionRunId) {
             $safeError = Escape-SqlText $err
             Invoke-SentinelQuery -SqlInstance $CentralSqlInstance -Database $CentralDatabase -SqlCredential $SqlCredential -Query @"
