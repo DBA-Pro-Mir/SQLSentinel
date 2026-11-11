@@ -3022,3 +3022,95 @@ SELECT
 FROM Ranked
 WHERE SizeRank <= 10;
 GO
+
+
+/*=============================================================================
+  Instance Version Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_InstanceVersionCurrent
+AS
+WITH L AS
+(
+    SELECT
+        ivs.*,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY ivs.InstanceId
+            ORDER BY ivs.CaptureTime DESC, ivs.InstanceVersionSnapshotId DESC
+        ) AS rn
+    FROM dbo.InstanceVersionSnapshot AS ivs
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    l.CaptureTime,
+    l.ProductVersion,
+    l.ProductLevel,
+    l.Edition,
+    l.ProductUpdateLevel,
+    l.ProductUpdateReference,
+    l.GlobalTraceFlags
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN L AS l
+    ON l.InstanceId = mi.InstanceId
+   AND l.rn = 1
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  Instance Configuration Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_InstanceConfigurationCurrent
+AS
+WITH LatestCapture AS
+(
+    SELECT
+        InstanceId,
+        MAX(CaptureTime) AS CaptureTime
+    FROM dbo.InstanceConfigurationSnapshot
+    GROUP BY InstanceId
+)
+SELECT
+    mi.InstanceId,
+    mi.InstanceName,
+    mi.EnvironmentName,
+    ics.CaptureTime,
+    ics.SettingName,
+    ics.Description,
+    ics.CurrentValue,
+    ics.ExpectedValue,
+    ics.ComplianceStatus
+FROM dbo.InstanceConfigurationSnapshot AS ics
+INNER JOIN LatestCapture AS lc
+    ON lc.InstanceId = ics.InstanceId
+   AND lc.CaptureTime = ics.CaptureTime
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.InstanceId = ics.InstanceId
+WHERE mi.IsEnabled = 1;
+GO
+
+/*=============================================================================
+  Instance Configuration Summary Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_InstanceConfigurationSummaryCurrent
+AS
+SELECT
+    icc.InstanceId,
+    icc.InstanceName,
+    icc.EnvironmentName,
+    MAX(icc.CaptureTime) AS CaptureTime,
+    COUNT(*) AS SettingCount,
+    SUM(CASE WHEN icc.ComplianceStatus = N'OK' THEN 1 ELSE 0 END) AS CompliantSettingCount,
+    SUM(CASE WHEN icc.ComplianceStatus = N'WRONG' THEN 1 ELSE 0 END) AS NonCompliantSettingCount,
+    CASE
+        WHEN SUM(CASE WHEN icc.ComplianceStatus = N'WRONG' THEN 1 ELSE 0 END) > 0
+            THEN N'Warning'
+        ELSE N'Healthy'
+    END AS ConfigurationHealth
+FROM rpt.vw_InstanceConfigurationCurrent AS icc
+GROUP BY
+    icc.InstanceId,
+    icc.InstanceName,
+    icc.EnvironmentName;
+GO
