@@ -161,6 +161,27 @@ S AS
         MAX
         (
             CASE
+                WHEN ms.CounterName = N'ActiveUserSessions'
+                THEN ms.MetricValue
+            END
+        ) AS ActiveUserSessions,
+        MAX
+        (
+            CASE
+                WHEN ms.CounterName = N'SleepingUserSessions'
+                THEN ms.MetricValue
+            END
+        ) AS SleepingUserSessions,
+        MAX
+        (
+            CASE
+                WHEN ms.CounterName = N'SleepingWithOpenTransactionCount'
+                THEN ms.MetricValue
+            END
+        ) AS SleepingWithOpenTransactionCount,
+        MAX
+        (
+            CASE
                 WHEN ms.CounterName = N'DistinctLogins'
                 THEN ms.MetricValue
             END
@@ -196,6 +217,9 @@ SELECT
     mi.EnvironmentName,
     s.CaptureTime,
     s.TotalUserSessions,
+    s.ActiveUserSessions,
+    s.SleepingUserSessions,
+    s.SleepingWithOpenTransactionCount,
     s.DistinctLogins,
     s.DistinctHosts,
     s.DistinctApplications,
@@ -3299,4 +3323,65 @@ SELECT
     [BatchRequestsPerMinute]
 FROM R
 WHERE [rn] = 1;
+GO
+
+
+/*=============================================================================
+  Operational Events Today
+  Top 10 current-day operational events per server and event category.
+  Sources are already bounded/deduplicated by the collectors.
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_OperationalEventsToday
+AS
+WITH E AS
+(
+    SELECT
+        mts.[InstanceId],
+        mts.[CaptureTime] AS [EventTime],
+        mts.[DatabaseName],
+        mts.[MetricCategory],
+        mts.[DetailType],
+        mts.[Severity],
+        mts.[NumericValue1],
+        mts.[NumericValue2],
+        mts.[Details],
+        mts.[SourceCollector],
+        [rn] = ROW_NUMBER() OVER
+        (
+            PARTITION BY mts.[InstanceId], mts.[MetricCategory]
+            ORDER BY mts.[CaptureTime] DESC, mts.[MetricTextSnapshotId] DESC
+        )
+    FROM dbo.MetricTextSnapshot AS mts
+    WHERE mts.[CaptureTime] >= CONVERT(date, SYSDATETIME())
+      AND mts.[MetricCategory] IN
+      (
+          N'SqlAgentJob',
+          N'SqlAgentAlert',
+          N'SqlErrorLog'
+      )
+      AND mts.[DetailType] IN
+      (
+          N'JobFailure',
+          N'AlertTriggered',
+          N'ErrorLogEvent'
+      )
+)
+SELECT
+    mi.[InstanceId],
+    mi.[InstanceName],
+    mi.[EnvironmentName],
+    e.[EventTime],
+    e.[MetricCategory] AS [Category],
+    e.[DetailType] AS [EventType],
+    e.[Severity],
+    e.[DatabaseName],
+    e.[NumericValue1],
+    e.[NumericValue2],
+    e.[Details],
+    e.[SourceCollector]
+FROM E AS e
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.[InstanceId] = e.[InstanceId]
+WHERE e.[rn] <= 10
+  AND mi.[IsEnabled] = 1;
 GO
