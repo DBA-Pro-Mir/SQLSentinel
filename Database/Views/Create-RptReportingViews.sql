@@ -3356,14 +3356,12 @@ WITH E AS
       AND mts.[MetricCategory] IN
       (
           N'SqlAgentJob',
-          N'SqlAgentAlert',
-          N'SqlErrorLog'
+          N'SqlAgentAlert'
       )
       AND mts.[DetailType] IN
       (
           N'JobFailure',
-          N'AlertTriggered',
-          N'ErrorLogEvent'
+          N'AlertTriggered'
       )
 )
 SELECT
@@ -3384,4 +3382,64 @@ INNER JOIN dbo.MonitoredInstances AS mi
     ON mi.[InstanceId] = e.[InstanceId]
 WHERE e.[rn] <= 10
   AND mi.[IsEnabled] = 1;
+GO
+
+
+/*=============================================================================
+  SQL Operational Summary Current
+  Lightweight current operational indicators; detailed log investigation lives
+  in Azure Log Analytics.
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_SqlOperationalSummaryCurrent
+AS
+WITH L AS
+(
+    SELECT
+        ms.[InstanceId],
+        ms.[CaptureTime],
+        ms.[CounterName],
+        ms.[MetricValue],
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY ms.[InstanceId], ms.[CounterName]
+            ORDER BY ms.[CaptureTime] DESC, ms.[MetricSnapshotId] DESC
+        ) AS [rn]
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.[SourceCollector] = N'Collect-SqlErrorLog'
+      AND ms.[MetricCategory] = N'SqlOperational'
+      AND ms.[ObjectName] = N'SqlOperationalSummary'
+),
+P AS
+(
+    SELECT
+        [InstanceId],
+        MAX([CaptureTime]) AS [CaptureTime],
+        MAX(CASE WHEN [CounterName]=N'SeverityEventsToday' AND [rn]=1 THEN [MetricValue] END) AS [SeverityEventsToday],
+        MAX(CASE WHEN [CounterName]=N'FailureEventsToday' AND [rn]=1 THEN [MetricValue] END) AS [FailureEventsToday],
+        MAX(CASE WHEN [CounterName]=N'RestartCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [RestartCount30Days],
+        MAX(CASE WHEN [CounterName]=N'ShutdownCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [ShutdownCount30Days],
+        MAX(CASE WHEN [CounterName]=N'SystemShutdownCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [SystemShutdownCount30Days],
+        MAX(CASE WHEN [CounterName]=N'ServiceStopCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [ServiceStopCount30Days],
+        MAX(CASE WHEN [CounterName]=N'SqlUptimeHours' AND [rn]=1 THEN [MetricValue] END) AS [SqlUptimeHours],
+        MAX(CASE WHEN [CounterName]=N'DaysSinceLastRestart' AND [rn]=1 THEN [MetricValue] END) AS [DaysSinceLastRestart]
+    FROM L
+    GROUP BY [InstanceId]
+)
+SELECT
+    mi.[InstanceId],
+    mi.[InstanceName],
+    mi.[EnvironmentName],
+    p.[CaptureTime],
+    p.[SeverityEventsToday],
+    p.[FailureEventsToday],
+    p.[RestartCount30Days],
+    p.[ShutdownCount30Days],
+    p.[SystemShutdownCount30Days],
+    p.[ServiceStopCount30Days],
+    p.[SqlUptimeHours],
+    p.[DaysSinceLastRestart]
+FROM dbo.MonitoredInstances AS mi
+LEFT JOIN P AS p
+    ON p.[InstanceId] = mi.[InstanceId]
+WHERE mi.[IsEnabled] = 1;
 GO
