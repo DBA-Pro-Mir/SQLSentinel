@@ -115,7 +115,7 @@ try {
     $CentralDatabase = $config.CentralDatabase
 
     $QueryTimeout = 60
-    $MaximumDetailRows = 200
+    $MaximumDetailRows = 10
     $RecentTriggerLookbackHours = 24
 
     if ($null -ne $config.Collectors -and
@@ -412,6 +412,7 @@ FROM #AlertDetails
 WHERE IsEnabled = 1
   AND OccurrenceCount > 0
   AND WasTriggeredRecently = 1
+  AND LastOccurrenceDateTime >= CONVERT(date, SYSDATETIME())
 ORDER BY
     CASE AlertSeverity
         WHEN 'Critical' THEN 1
@@ -569,40 +570,69 @@ NotificationMethods: $notificationMethods
                     $safeDetailType = $detailType.Replace("'", "''")
                     $safeSeverity = $severity.Replace("'", "''")
 
-                    Invoke-DbaQuery `
+                    $eventCaptureTime = $captureTime
+                    if ($detailType -eq "AlertTriggered" -and
+                        $null -ne $alert.LastOccurrenceDateTime -and
+                        -not [System.DBNull]::Value.Equals($alert.LastOccurrenceDateTime)) {
+                        $eventCaptureTime = ([datetime]$alert.LastOccurrenceDateTime).ToString("yyyy-MM-dd HH:mm:ss")
+                    }
+
+                    $inserted = Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
                         -SqlCredential $SqlCredential `
                         -Database $CentralDatabase `
                         -Query @"
-INSERT INTO dbo.MetricTextSnapshot
+IF NOT EXISTS
 (
-    InstanceId,
-    CaptureTime,
-    MetricCategory,
-    DetailType,
-    Severity,
-    NumericValue1,
-    NumericValue2,
-    Details,
-    SourceCollector
+    SELECT 1
+    FROM dbo.MetricTextSnapshot
+    WHERE InstanceId = $InstanceId
+      AND CaptureTime = '$eventCaptureTime'
+      AND MetricCategory = N'SqlAgentAlert'
+      AND DetailType = N'$safeDetailType'
+      AND Details = N'$safeDetails'
+      AND SourceCollector = N'$CollectorName'
 )
-VALUES
-(
-    $InstanceId,
-    '$captureTime',
-    'SqlAgentAlert',
-    '$safeDetailType',
-    '$safeSeverity',
-    $occurrenceCount,
-    $wasTriggeredRecently,
-    N'$safeDetails',
-    '$CollectorName'
-);
-"@ `
-                        -QueryTimeout $QueryTimeout `
-                        -EnableException | Out-Null
+BEGIN
+    INSERT INTO dbo.MetricTextSnapshot
+    (
+        InstanceId,
+        CaptureTime,
+        MetricCategory,
+        DetailType,
+        Severity,
+        NumericValue1,
+        NumericValue2,
+        Details,
+        SourceCollector
+    )
+    VALUES
+    (
+        $InstanceId,
+        '$eventCaptureTime',
+        N'SqlAgentAlert',
+        N'$safeDetailType',
+        N'$safeSeverity',
+        $occurrenceCount,
+        $wasTriggeredRecently,
+        N'$safeDetails',
+        N'$CollectorName'
+    );
 
-                    $RowsCollected++
+    SELECT Inserted = 1;
+END
+ELSE
+BEGIN
+    SELECT Inserted = 0;
+END;
+"@ `
+                        -As SingleValue `
+                        -QueryTimeout $QueryTimeout `
+                        -EnableException
+
+                    if ([int]$inserted -eq 1) {
+                        $RowsCollected++
+                    }
                 }
             }
 
