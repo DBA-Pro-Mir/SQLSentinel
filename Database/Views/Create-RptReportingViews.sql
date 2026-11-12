@@ -3416,7 +3416,6 @@ P AS
         MAX([CaptureTime]) AS [CaptureTime],
         MAX(CASE WHEN [CounterName]=N'SeverityEventsToday' AND [rn]=1 THEN [MetricValue] END) AS [SeverityEventsToday],
         MAX(CASE WHEN [CounterName]=N'FailureEventsToday' AND [rn]=1 THEN [MetricValue] END) AS [FailureEventsToday],
-        MAX(CASE WHEN [CounterName]=N'RestartCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [RestartCount30Days],
         MAX(CASE WHEN [CounterName]=N'ShutdownCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [ShutdownCount30Days],
         MAX(CASE WHEN [CounterName]=N'SystemShutdownCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [SystemShutdownCount30Days],
         MAX(CASE WHEN [CounterName]=N'ServiceStopCount30Days' AND [rn]=1 THEN [MetricValue] END) AS [ServiceStopCount30Days],
@@ -3424,6 +3423,19 @@ P AS
         MAX(CASE WHEN [CounterName]=N'DaysSinceLastRestart' AND [rn]=1 THEN [MetricValue] END) AS [DaysSinceLastRestart]
     FROM L
     GROUP BY [InstanceId]
+),
+R AS
+(
+    SELECT
+        ms.[InstanceId],
+        SUM(ms.[MetricValue]) AS [RestartCount30Days]
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.[SourceCollector] = N'Collect-SqlErrorLog'
+      AND ms.[MetricCategory] = N'SqlOperational'
+      AND ms.[ObjectName] = N'SqlOperationalSummary'
+      AND ms.[CounterName] = N'RestartDetected'
+      AND ms.[CaptureTime] >= DATEADD(DAY,-30,SYSDATETIME())
+    GROUP BY ms.[InstanceId]
 )
 SELECT
     mi.[InstanceId],
@@ -3432,7 +3444,7 @@ SELECT
     p.[CaptureTime],
     p.[SeverityEventsToday],
     p.[FailureEventsToday],
-    p.[RestartCount30Days],
+    ISNULL(r.[RestartCount30Days],0) AS [RestartCount30Days],
     p.[ShutdownCount30Days],
     p.[SystemShutdownCount30Days],
     p.[ServiceStopCount30Days],
@@ -3441,5 +3453,7 @@ SELECT
 FROM dbo.MonitoredInstances AS mi
 LEFT JOIN P AS p
     ON p.[InstanceId] = mi.[InstanceId]
+LEFT JOIN R AS r
+    ON r.[InstanceId] = mi.[InstanceId]
 WHERE mi.[IsEnabled] = 1;
 GO
