@@ -244,7 +244,7 @@ INTO #BackupStatus
 FROM sys.databases d
 LEFT JOIN LastBackups lb
     ON d.name = lb.database_name
-WHERE d.name <> 'tempdb'
+WHERE d.database_id > 4
   AND d.state_desc = 'ONLINE'
 GROUP BY
     d.name,
