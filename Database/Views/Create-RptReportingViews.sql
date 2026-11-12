@@ -3177,3 +3177,126 @@ LEFT JOIN rpt.vw_InstanceVersionCurrent AS iv
 LEFT JOIN rpt.vw_InstanceConfigurationSummaryCurrent AS cs
     ON cs.[InstanceId] = shs.[InstanceId];
 GO
+
+
+/*=============================================================================
+  Batch Requests Per Minute Trend
+  SQL Server exposes Batch Requests/sec as a cumulative counter in
+  sys.dm_os_performance_counters. Calculate the rate between repository samples.
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_BatchRequestsPerMinuteTrend
+AS
+WITH S AS
+(
+    SELECT
+        ms.[InstanceId],
+        ms.[CaptureTime],
+        ms.[MetricValue] AS [CurrentCounterValue],
+        LAG(ms.[MetricValue]) OVER
+        (
+            PARTITION BY ms.[InstanceId]
+            ORDER BY ms.[CaptureTime]
+        ) AS [PreviousCounterValue],
+        LAG(ms.[CaptureTime]) OVER
+        (
+            PARTITION BY ms.[InstanceId]
+            ORDER BY ms.[CaptureTime]
+        ) AS [PreviousCaptureTime]
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.[SourceCollector] = N'Collect-PerformanceCounters'
+      AND ms.[MetricCategory] = N'PerformanceCounter'
+      AND ms.[CounterName] = N'Batch Requests/sec'
+)
+SELECT
+    mi.[InstanceId],
+    mi.[InstanceName],
+    mi.[EnvironmentName],
+    s.[CaptureTime],
+    s.[PreviousCaptureTime],
+    s.[CurrentCounterValue],
+    s.[PreviousCounterValue],
+    [ElapsedSeconds] =
+        DATEDIFF(SECOND, s.[PreviousCaptureTime], s.[CaptureTime]),
+    [BatchRequestsPerSecond] =
+        CONVERT
+        (
+            decimal(19,2),
+            CASE
+                WHEN s.[PreviousCounterValue] IS NULL
+                  OR s.[PreviousCaptureTime] IS NULL
+                  OR s.[CurrentCounterValue] < s.[PreviousCounterValue]
+                  OR DATEDIFF(SECOND, s.[PreviousCaptureTime], s.[CaptureTime]) <= 0
+                    THEN NULL
+                ELSE
+                    (s.[CurrentCounterValue] - s.[PreviousCounterValue])
+                    / NULLIF
+                      (
+                          CONVERT
+                          (
+                              decimal(19,6),
+                              DATEDIFF(SECOND, s.[PreviousCaptureTime], s.[CaptureTime])
+                          ),
+                          0
+                      )
+            END
+        ),
+    [BatchRequestsPerMinute] =
+        CONVERT
+        (
+            decimal(19,2),
+            CASE
+                WHEN s.[PreviousCounterValue] IS NULL
+                  OR s.[PreviousCaptureTime] IS NULL
+                  OR s.[CurrentCounterValue] < s.[PreviousCounterValue]
+                  OR DATEDIFF(SECOND, s.[PreviousCaptureTime], s.[CaptureTime]) <= 0
+                    THEN NULL
+                ELSE
+                    (
+                        (s.[CurrentCounterValue] - s.[PreviousCounterValue])
+                        / NULLIF
+                          (
+                              CONVERT
+                              (
+                                  decimal(19,6),
+                                  DATEDIFF(SECOND, s.[PreviousCaptureTime], s.[CaptureTime])
+                              ),
+                              0
+                          )
+                    ) * 60.0
+            END
+        )
+FROM S AS s
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.[InstanceId] = s.[InstanceId]
+WHERE mi.[IsEnabled] = 1;
+GO
+
+/*=============================================================================
+  Batch Requests Per Minute Current
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_BatchRequestsPerMinuteCurrent
+AS
+WITH R AS
+(
+    SELECT
+        br.*,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY br.[InstanceId]
+            ORDER BY br.[CaptureTime] DESC
+        ) AS [rn]
+    FROM rpt.vw_BatchRequestsPerMinuteTrend AS br
+    WHERE br.[BatchRequestsPerMinute] IS NOT NULL
+)
+SELECT
+    [InstanceId],
+    [InstanceName],
+    [EnvironmentName],
+    [CaptureTime],
+    [PreviousCaptureTime],
+    [ElapsedSeconds],
+    [BatchRequestsPerSecond],
+    [BatchRequestsPerMinute]
+FROM R
+WHERE [rn] = 1;
+GO
