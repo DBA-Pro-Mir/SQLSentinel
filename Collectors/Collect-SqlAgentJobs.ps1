@@ -95,7 +95,7 @@ try {
 
     $QueryTimeout = 15
     $LookbackHours = 24
-    $MaximumDetailRows = 100
+    $MaximumDetailRows = 10
 
     if ($null -ne $config.Collectors -and
     $config.Collectors.PSObject.Properties.Name -contains "SqlAgentJobs") {
@@ -252,6 +252,7 @@ SELECT TOP ($MaximumDetailRows)
     Message
 FROM #RecentJobHistory
 WHERE run_status IN (0, 2, 3)
+  AND RunDateTime >= CONVERT(date, SYSDATETIME())
 ORDER BY RunDateTime DESC;
 
 SELECT TOP ($MaximumDetailRows)
@@ -365,37 +366,61 @@ Message: $message
                     $safeDetails = $detailText.Replace("'", "''")
                     $safeJobName = $jobName.Replace("'", "''")
 
-                    Invoke-DbaQuery `
+                    $failureTime = ([datetime]$failure.RunDateTime).ToString("yyyy-MM-dd HH:mm:ss")
+
+                    $inserted = Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
                         -SqlCredential $SqlCredential `
                         -Database $CentralDatabase `
                         -Query @"
-INSERT INTO dbo.MetricTextSnapshot
+IF NOT EXISTS
 (
-    InstanceId,
-    CaptureTime,
-    MetricCategory,
-    DetailType,
-    Severity,
-    NumericValue1,
-    Details,
-    SourceCollector
+    SELECT 1
+    FROM dbo.MetricTextSnapshot
+    WHERE InstanceId = $InstanceId
+      AND CaptureTime = '$failureTime'
+      AND MetricCategory = N'SqlAgentJob'
+      AND DetailType = N'JobFailure'
+      AND Details = N'$safeDetails'
+      AND SourceCollector = N'$CollectorName'
 )
-VALUES
-(
-    $InstanceId,
-    '$captureTime',
-    'SqlAgentJob',
-    'JobFailure',
-    'Warning',
-    $([decimal]$failure.RunDurationSeconds),
-    N'$safeDetails',
-    '$CollectorName'
-);
-"@ `
-                        -QueryTimeout $QueryTimeout | Out-Null
+BEGIN
+    INSERT INTO dbo.MetricTextSnapshot
+    (
+        InstanceId,
+        CaptureTime,
+        MetricCategory,
+        DetailType,
+        Severity,
+        NumericValue1,
+        Details,
+        SourceCollector
+    )
+    VALUES
+    (
+        $InstanceId,
+        '$failureTime',
+        N'SqlAgentJob',
+        N'JobFailure',
+        N'Warning',
+        $([decimal]$failure.RunDurationSeconds),
+        N'$safeDetails',
+        N'$CollectorName'
+    );
 
-                    $RowsCollected++
+    SELECT Inserted = 1;
+END
+ELSE
+BEGIN
+    SELECT Inserted = 0;
+END;
+"@ `
+                        -As SingleValue `
+                        -QueryTimeout $QueryTimeout
+
+                    if ([int]$inserted -eq 1) {
+                        $RowsCollected++
+                    }
                 }
             }
 
