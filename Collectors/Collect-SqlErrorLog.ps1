@@ -106,8 +106,6 @@ DEALLOCATE LogCursor;
     SELECT
         [LogDate],
         [Text],
-        [IsStartup] =
-            CASE WHEN [Text] LIKE N'%Server process ID is%' THEN 1 ELSE 0 END,
         [IsSystemShutdown] =
             CASE WHEN [Text] LIKE N'%terminating because of a system shutdown%' THEN 1 ELSE 0 END,
         [IsServiceStop] =
@@ -131,8 +129,13 @@ SELECT
             WHERE [LogDate] >= @Today
               AND [Text] LIKE N'%fail%'
         ),
-    [RestartCount30Days] =
-        ISNULL(SUM(CASE WHEN [IsStartup] = 1 THEN 1 ELSE 0 END), 0),
+    [SqlServerStartEpochSeconds] =
+        DATEDIFF_BIG
+        (
+            SECOND,
+            CONVERT(datetime2(0),'19700101'),
+            (SELECT [sqlserver_start_time] FROM sys.dm_os_sys_info)
+        ),
     [ShutdownCount30Days] =
         ISNULL(SUM(CASE WHEN [IsSystemShutdown] = 1 OR [IsServiceStop] = 1 THEN 1 ELSE 0 END), 0),
     [SystemShutdownCount30Days] =
@@ -164,11 +167,38 @@ DROP TABLE #Logs;
         }
 
         $captureTime = ([datetime]$summary.CaptureTime).ToString('yyyy-MM-dd HH:mm:ss')
+        $currentStartEpoch = [decimal]$summary.SqlServerStartEpochSeconds
+
+        $previousStartEpoch = Invoke-DbaQuery `
+            -SqlInstance $CentralSqlInstance `
+            -SqlCredential $SqlCredential `
+            -Database $CentralDatabase `
+            -As SingleValue `
+            -EnableException `
+            -Query @"
+SELECT TOP (1)
+    [MetricValue]
+FROM dbo.MetricSnapshot
+WHERE [InstanceId] = $InstanceId
+  AND [SourceCollector] = N'$CollectorName'
+  AND [MetricCategory] = N'SqlOperational'
+  AND [ObjectName] = N'SqlOperationalSummary'
+  AND [CounterName] = N'SqlServerStartEpochSeconds'
+ORDER BY [CaptureTime] DESC, [MetricSnapshotId] DESC;
+"@
+
+        $restartDetected = 0
+        if ($null -ne $previousStartEpoch -and
+            -not [System.DBNull]::Value.Equals($previousStartEpoch) -and
+            [decimal]$previousStartEpoch -ne $currentStartEpoch) {
+            $restartDetected = 1
+        }
 
         $metrics = @(
             @{ Name='SeverityEventsToday'; Value=[decimal]$summary.SeverityEventsToday; Unit='count' },
             @{ Name='FailureEventsToday'; Value=[decimal]$summary.FailureEventsToday; Unit='count' },
-            @{ Name='RestartCount30Days'; Value=[decimal]$summary.RestartCount30Days; Unit='count' },
+            @{ Name='SqlServerStartEpochSeconds'; Value=$currentStartEpoch; Unit='epoch_sec' },
+            @{ Name='RestartDetected'; Value=[decimal]$restartDetected; Unit='count' },
             @{ Name='ShutdownCount30Days'; Value=[decimal]$summary.ShutdownCount30Days; Unit='count' },
             @{ Name='SystemShutdownCount30Days'; Value=[decimal]$summary.SystemShutdownCount30Days; Unit='count' },
             @{ Name='ServiceStopCount30Days'; Value=[decimal]$summary.ServiceStopCount30Days; Unit='count' },
