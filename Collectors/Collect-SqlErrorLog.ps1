@@ -4,7 +4,6 @@ param([string]$ConfigPath = '.\Config\SQLSentinel.config.json')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $CollectorName = 'Collect-SqlErrorLog'
-$MaximumDailyRows = 10
 
 function Write-Info { param([string]$Message) Write-Host "[INFO] $Message" -ForegroundColor Cyan }
 function Write-Warn { param([string]$Message) Write-Host "[WARN] $Message" -ForegroundColor Yellow }
@@ -23,7 +22,8 @@ Set-DbatoolsConfig -FullName 'sql.connection.trustcert' -Value $true
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $CentralSqlInstance = [string]$config.CentralSqlInstance
 $CentralDatabase = [string]$config.CentralDatabase
-$QueryTimeout = 30
+$QueryTimeout = 60
+$LookbackDays = 30
 
 $SqlCredential = $null
 if ($config.SqlCredential.Username -and $config.SqlCredential.Password) {
@@ -46,7 +46,7 @@ foreach ($instance in $instances) {
     $RowsCollected = 0
     $CollectionRunId = $null
 
-    Write-Info "Collecting SQL error log events from $TargetInstance"
+    Write-Info "Collecting SQL operational summary from $TargetInstance"
 
     try {
         $CollectionRunId = Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -As SingleValue -EnableException -Query @"
@@ -55,57 +55,160 @@ OUTPUT inserted.CollectionRunId
 VALUES (N'$CollectorName',$InstanceId,SYSDATETIME(),N'Running');
 "@
 
-        $severityRows = @(Invoke-DbaQuery -SqlInstance $TargetInstance -SqlCredential $SqlCredential -Database master -Query "EXEC master.dbo.xp_readerrorlog 0, 1, N'Severity';" -QueryTimeout $QueryTimeout -EnableException)
-        $failureRows  = @(Invoke-DbaQuery -SqlInstance $TargetInstance -SqlCredential $SqlCredential -Database master -Query "EXEC master.dbo.xp_readerrorlog 0, 1, N'fail';" -QueryTimeout $QueryTimeout -EnableException)
+        $summary = Invoke-DbaQuery -SqlInstance $TargetInstance -SqlCredential $SqlCredential -Database master -Query @"
+SET NOCOUNT ON;
 
-        $today = (Get-Date).Date
-        $events = @($severityRows + $failureRows) |
-            Where-Object {
-                $null -ne $_.LogDate -and
-                -not [System.DBNull]::Value.Equals($_.LogDate) -and
-                ([datetime]$_.LogDate) -ge $today
-            } |
-            Sort-Object @{Expression={ [datetime]$_.LogDate }; Descending=$true} |
-            Group-Object {
-                ('{0:O}|{1}|{2}' -f ([datetime]$_.LogDate), [string]$_.ProcessInfo, [string]$_.Text)
-            } |
-            ForEach-Object { $_.Group[0] } |
-            Select-Object -First $MaximumDailyRows
+DECLARE @Days int = $LookbackDays;
+DECLARE @StartDate datetime = DATEADD(DAY, -@Days, GETDATE());
+DECLARE @Today datetime = CONVERT(date, GETDATE());
 
-        foreach ($event in $events) {
-            $eventTime = ([datetime]$event.LogDate).ToString('yyyy-MM-dd HH:mm:ss')
-            $processInfo = Escape-SqlText $event.ProcessInfo
-            $message = Escape-SqlText $event.Text
-            $severity = if ([string]$event.Text -match '(?i)severity\s+(2[0-5]|1[7-9])') { 'Critical' } else { 'Warning' }
-
-            $details = Escape-SqlText ("ProcessInfo: {0}`nMessage: {1}" -f [string]$event.ProcessInfo,[string]$event.Text)
-
-            $inserted = Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -As SingleValue -EnableException -Query @"
-IF NOT EXISTS
+CREATE TABLE #Logs
 (
-    SELECT 1
-    FROM dbo.MetricTextSnapshot
-    WHERE [InstanceId] = $InstanceId
-      AND [CaptureTime] = '$eventTime'
-      AND [MetricCategory] = N'SqlErrorLog'
-      AND [DetailType] = N'ErrorLogEvent'
-      AND [Details] = N'$details'
-      AND [SourceCollector] = N'$CollectorName'
-)
-BEGIN
-    INSERT INTO dbo.MetricTextSnapshot
-    ([InstanceId],[CaptureTime],[MetricCategory],[DetailType],[Severity],[Details],[SourceCollector])
-    VALUES
-    ($InstanceId,'$eventTime',N'SqlErrorLog',N'ErrorLogEvent',N'$severity',N'$details',N'$CollectorName');
-    SELECT Inserted = 1;
-END
-ELSE
-BEGIN
-    SELECT Inserted = 0;
-END;
-"@
+    ArchiveNo int,
+    LogDate   datetime,
+    LogSize   bigint
+);
 
-            if ([int]$inserted -eq 1) { $RowsCollected++ }
+INSERT INTO #Logs
+EXEC master.dbo.sp_enumerrorlogs;
+
+CREATE TABLE #ErrorLog
+(
+    LogDate     datetime,
+    ProcessInfo nvarchar(50),
+    [Text]      nvarchar(max)
+);
+
+DECLARE @LogNumber int;
+
+DECLARE LogCursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT [ArchiveNo]
+FROM #Logs
+WHERE [LogDate] >= DATEADD(DAY, -1, @StartDate)
+   OR [ArchiveNo] = 0;
+
+OPEN LogCursor;
+FETCH NEXT FROM LogCursor INTO @LogNumber;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    INSERT INTO #ErrorLog
+    EXEC master.dbo.xp_readerrorlog @LogNumber, 1;
+
+    FETCH NEXT FROM LogCursor INTO @LogNumber;
+END;
+
+CLOSE LogCursor;
+DEALLOCATE LogCursor;
+
+;WITH Events AS
+(
+    SELECT
+        [LogDate],
+        [Text],
+        [IsStartup] =
+            CASE WHEN [Text] LIKE N'%Server process ID is%' THEN 1 ELSE 0 END,
+        [IsSystemShutdown] =
+            CASE WHEN [Text] LIKE N'%terminating because of a system shutdown%' THEN 1 ELSE 0 END,
+        [IsServiceStop] =
+            CASE WHEN [Text] LIKE N'%terminating in response to a ''stop'' request%' THEN 1 ELSE 0 END
+    FROM #ErrorLog
+    WHERE [LogDate] >= @StartDate
+)
+SELECT
+    [CaptureTime] = SYSDATETIME(),
+    [SeverityEventsToday] =
+        (
+            SELECT COUNT_BIG(*)
+            FROM #ErrorLog
+            WHERE [LogDate] >= @Today
+              AND [Text] LIKE N'%Severity%'
+        ),
+    [FailureEventsToday] =
+        (
+            SELECT COUNT_BIG(*)
+            FROM #ErrorLog
+            WHERE [LogDate] >= @Today
+              AND [Text] LIKE N'%fail%'
+        ),
+    [RestartCount30Days] =
+        ISNULL(SUM(CASE WHEN [IsStartup] = 1 THEN 1 ELSE 0 END), 0),
+    [ShutdownCount30Days] =
+        ISNULL(SUM(CASE WHEN [IsSystemShutdown] = 1 OR [IsServiceStop] = 1 THEN 1 ELSE 0 END), 0),
+    [SystemShutdownCount30Days] =
+        ISNULL(SUM([IsSystemShutdown]), 0),
+    [ServiceStopCount30Days] =
+        ISNULL(SUM([IsServiceStop]), 0),
+    [SqlUptimeHours] =
+        CONVERT(decimal(19,2),
+            DATEDIFF(MINUTE,
+                (SELECT [sqlserver_start_time] FROM sys.dm_os_sys_info),
+                SYSDATETIME()
+            ) / 60.0
+        ),
+    [DaysSinceLastRestart] =
+        CONVERT(decimal(19,2),
+            DATEDIFF(MINUTE,
+                (SELECT [sqlserver_start_time] FROM sys.dm_os_sys_info),
+                SYSDATETIME()
+            ) / 1440.0
+        )
+FROM Events;
+
+DROP TABLE #ErrorLog;
+DROP TABLE #Logs;
+"@ -QueryTimeout $QueryTimeout -EnableException | Select-Object -First 1
+
+        if ($null -eq $summary) {
+            throw "SQL operational summary returned no rows."
+        }
+
+        $captureTime = ([datetime]$summary.CaptureTime).ToString('yyyy-MM-dd HH:mm:ss')
+
+        $metrics = @(
+            @{ Name='SeverityEventsToday'; Value=[decimal]$summary.SeverityEventsToday; Unit='count' },
+            @{ Name='FailureEventsToday'; Value=[decimal]$summary.FailureEventsToday; Unit='count' },
+            @{ Name='RestartCount30Days'; Value=[decimal]$summary.RestartCount30Days; Unit='count' },
+            @{ Name='ShutdownCount30Days'; Value=[decimal]$summary.ShutdownCount30Days; Unit='count' },
+            @{ Name='SystemShutdownCount30Days'; Value=[decimal]$summary.SystemShutdownCount30Days; Unit='count' },
+            @{ Name='ServiceStopCount30Days'; Value=[decimal]$summary.ServiceStopCount30Days; Unit='count' },
+            @{ Name='SqlUptimeHours'; Value=[decimal]$summary.SqlUptimeHours; Unit='hours' },
+            @{ Name='DaysSinceLastRestart'; Value=[decimal]$summary.DaysSinceLastRestart; Unit='days' }
+        )
+
+        foreach ($metric in $metrics) {
+            Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -EnableException -Query @"
+INSERT INTO dbo.MetricSnapshot
+(
+    [InstanceId],
+    [CaptureTime],
+    [DatabaseName],
+    [ObjectName],
+    [CounterName],
+    [InstanceName],
+    [MetricCategory],
+    [MetricValue],
+    [MetricType],
+    [Unit],
+    [SourceCollector]
+)
+VALUES
+(
+    $InstanceId,
+    '$captureTime',
+    NULL,
+    N'SqlOperationalSummary',
+    N'$($metric.Name)',
+    NULL,
+    N'SqlOperational',
+    $($metric.Value),
+    N'Gauge',
+    N'$($metric.Unit)',
+    N'$CollectorName'
+);
+"@ | Out-Null
+
+            $RowsCollected++
         }
 
         Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -EnableException -Query @"
@@ -122,13 +225,17 @@ WHERE [CollectionRunId]=$CollectionRunId;
     }
     catch {
         $err = $_.Exception.Message
-        Write-Warn ("Failed collecting SQL error log from {0}: {1}" -f $TargetInstance,$err)
+        Write-Warn ("Failed collecting SQL operational summary from {0}: {1}" -f $TargetInstance,$err)
+
         if ($null -ne $CollectionRunId) {
             $safeError = Escape-SqlText $err
             Invoke-DbaQuery -SqlInstance $CentralSqlInstance -SqlCredential $SqlCredential -Database $CentralDatabase -Query @"
 UPDATE dbo.CollectionRunHistory
-SET [FinishedAt]=SYSDATETIME(),[Status]=N'Failed',[RowsCollected]=$RowsCollected,
-    [DurationMs]=DATEDIFF(MILLISECOND,[StartedAt],SYSDATETIME()),[ErrorMessage]=N'$safeError'
+SET [FinishedAt]=SYSDATETIME(),
+    [Status]=N'Failed',
+    [RowsCollected]=$RowsCollected,
+    [DurationMs]=DATEDIFF(MILLISECOND,[StartedAt],SYSDATETIME()),
+    [ErrorMessage]=N'$safeError'
 WHERE [CollectionRunId]=$CollectionRunId;
 "@ | Out-Null
         }
