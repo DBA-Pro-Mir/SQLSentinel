@@ -172,23 +172,29 @@ ORDER BY InstanceName;
                 -CollectorName $CollectorName
 
             $sessionQuery = @"
-WITH ActiveSessions AS
+WITH UserSessions AS
 (
     SELECT
         login_name,
         host_name,
         program_name,
-        database_id
+        database_id,
+        status,
+        open_transaction_count
     FROM sys.dm_exec_sessions
     WHERE is_user_process = 1
 )
 SELECT
     SYSDATETIME() AS CaptureTime,
     TotalUserSessions = COUNT_BIG(1),
+    ActiveUserSessions = SUM(CASE WHEN status <> N'sleeping' THEN 1 ELSE 0 END),
+    SleepingUserSessions = SUM(CASE WHEN status = N'sleeping' THEN 1 ELSE 0 END),
+    SleepingWithOpenTransactionCount =
+        SUM(CASE WHEN status = N'sleeping' AND open_transaction_count > 0 THEN 1 ELSE 0 END),
     DistinctLogins = COUNT(DISTINCT NULLIF(login_name, '')),
     DistinctHosts = COUNT(DISTINCT NULLIF(host_name, '')),
     DistinctApplications = COUNT(DISTINCT NULLIF(program_name, ''))
-FROM ActiveSessions;
+FROM UserSessions;
 
 SELECT TOP ($MaximumBreakdownRows)
     SYSDATETIME() AS CaptureTime,
@@ -249,6 +255,9 @@ ORDER BY COUNT_BIG(1) DESC;
                 $summaryRow = $sessionResults.Tables[0].Rows[0]
                 $summaryMetrics = @(
                     @{ CounterName = "TotalUserSessions"; Value = [decimal]$summaryRow.TotalUserSessions },
+                    @{ CounterName = "ActiveUserSessions"; Value = [decimal]$summaryRow.ActiveUserSessions },
+                    @{ CounterName = "SleepingUserSessions"; Value = [decimal]$summaryRow.SleepingUserSessions },
+                    @{ CounterName = "SleepingWithOpenTransactionCount"; Value = [decimal]$summaryRow.SleepingWithOpenTransactionCount },
                     @{ CounterName = "DistinctLogins"; Value = [decimal]$summaryRow.DistinctLogins },
                     @{ CounterName = "DistinctHosts"; Value = [decimal]$summaryRow.DistinctHosts },
                     @{ CounterName = "DistinctApplications"; Value = [decimal]$summaryRow.DistinctApplications }
