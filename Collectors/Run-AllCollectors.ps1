@@ -24,7 +24,8 @@ $Collectors = @(
     ".\Collectors\Collect-Backups.ps1",
     ".\Collectors\Collect-QueryStats.ps1",
     ".\Collectors\Collect-SqlAgentJobs.ps1",
-    ".\Collectors\Collect-SqlAgentAlerts.ps1"
+    ".\Collectors\Collect-SqlAgentAlerts.ps1",
+    ".\Collectors\Collect-SqlErrorLog.ps1"
 )
 
 $Success = 0
