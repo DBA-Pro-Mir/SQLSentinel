@@ -7,6 +7,7 @@
  Current retention policy:
    MetricSnapshot                 30 days
    MetricTextSnapshot             60 days
+   Operational event text         30 days
    CollectionRunHistory           90 days
    DatabaseCapacitySnapshot       90 days
    VolumeCapacitySnapshot         90 days
@@ -43,6 +44,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_SQLSentinelRepositoryCleanup
 (
     @MetricRetentionDays             int = 30,
     @TextMetricRetentionDays         int = 60,
+    @OperationalEventRetentionDays   int = 30,
     @CollectionRunRetentionDays      int = 90,
     @DatabaseCapacityRetentionDays   int = 90,
     @VolumeCapacityRetentionDays     int = 90,
@@ -56,6 +58,7 @@ BEGIN
 
     IF @MetricRetentionDays < 7
        OR @TextMetricRetentionDays < 7
+       OR @OperationalEventRetentionDays < 7
        OR @CollectionRunRetentionDays < 30
        OR @DatabaseCapacityRetentionDays < 30
        OR @VolumeCapacityRetentionDays < 30
@@ -69,6 +72,7 @@ BEGIN
     DECLARE
         @MetricCutoff             datetime2(0) = DATEADD(DAY, -@MetricRetentionDays, SYSDATETIME()),
         @TextMetricCutoff         datetime2(0) = DATEADD(DAY, -@TextMetricRetentionDays, SYSDATETIME()),
+        @OperationalEventCutoff   datetime2(0) = DATEADD(DAY, -@OperationalEventRetentionDays, SYSDATETIME()),
         @CollectionRunCutoff      datetime2(0) = DATEADD(DAY, -@CollectionRunRetentionDays, SYSDATETIME()),
         @DatabaseCapacityCutoff   datetime2(0) = DATEADD(DAY, -@DatabaseCapacityRetentionDays, SYSDATETIME()),
         @VolumeCapacityCutoff     datetime2(0) = DATEADD(DAY, -@VolumeCapacityRetentionDays, SYSDATETIME()),
@@ -91,6 +95,16 @@ BEGIN
             @TextMetricCutoff
         FROM dbo.MetricTextSnapshot
         WHERE [CaptureTime] < @TextMetricCutoff
+
+        UNION ALL
+
+        SELECT
+            N'OperationalEvents',
+            COUNT_BIG(*),
+            @OperationalEventCutoff
+        FROM dbo.MetricTextSnapshot
+        WHERE [CaptureTime] < @OperationalEventCutoff
+          AND [MetricCategory] IN (N'SqlAgentJob',N'SqlAgentAlert',N'SqlErrorLog')
 
         UNION ALL
 
@@ -128,6 +142,18 @@ BEGIN
         DELETE TOP (@BatchSize)
         FROM dbo.MetricSnapshot
         WHERE [CaptureTime] < @MetricCutoff;
+
+        SET @RowsDeleted = @@ROWCOUNT;
+        IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
+    END;
+
+    SET @RowsDeleted = 1;
+    WHILE @RowsDeleted > 0
+    BEGIN
+        DELETE TOP (@BatchSize)
+        FROM dbo.MetricTextSnapshot
+        WHERE [CaptureTime] < @OperationalEventCutoff
+          AND [MetricCategory] IN (N'SqlAgentJob',N'SqlAgentAlert',N'SqlErrorLog');
 
         SET @RowsDeleted = @@ROWCOUNT;
         IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
