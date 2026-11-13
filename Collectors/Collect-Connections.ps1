@@ -254,7 +254,7 @@ SELECT TOP ($MaximumDatabaseRows)
         SUM(CASE WHEN status = N'sleeping' AND open_transaction_count > 0 THEN 1 ELSE 0 END)
 FROM sys.dm_exec_sessions
 WHERE is_user_process = 1
-  AND database_id > 0
+  AND database_id > 4
 GROUP BY database_id
 HAVING COUNT_BIG(1) >= $DatabaseConnectionThreshold
 ORDER BY COUNT_BIG(1) DESC;
