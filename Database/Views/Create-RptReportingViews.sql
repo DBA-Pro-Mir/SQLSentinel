@@ -3483,6 +3483,13 @@ WITH P AS
     WHERE ms.[SourceCollector] = N'Collect-Connections'
       AND ms.[MetricCategory] = N'Connection'
       AND ms.[ObjectName] = N'DatabaseConnectionPressure'
+      AND ISNULL(ms.[DatabaseName],N'') NOT IN
+      (
+          N'master',
+          N'model',
+          N'msdb',
+          N'tempdb'
+      )
     GROUP BY
         ms.[InstanceId],
         ms.[CaptureTime],
