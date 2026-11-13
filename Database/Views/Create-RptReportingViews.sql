@@ -3457,3 +3457,76 @@ LEFT JOIN R AS r
     ON r.[InstanceId] = mi.[InstanceId]
 WHERE mi.[IsEnabled] = 1;
 GO
+
+
+/*=============================================================================
+  Database Connection Pressure Trend
+  Stores only databases that crossed the configured connection threshold.
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_DatabaseConnectionPressureTrend
+AS
+WITH P AS
+(
+    SELECT
+        ms.[InstanceId],
+        ms.[CaptureTime],
+        ms.[DatabaseName],
+        MAX(CASE WHEN ms.[CounterName] = N'TotalConnections'
+                 THEN ms.[MetricValue] END) AS [TotalConnections],
+        MAX(CASE WHEN ms.[CounterName] = N'ActiveConnections'
+                 THEN ms.[MetricValue] END) AS [ActiveConnections],
+        MAX(CASE WHEN ms.[CounterName] = N'SleepingConnections'
+                 THEN ms.[MetricValue] END) AS [SleepingConnections],
+        MAX(CASE WHEN ms.[CounterName] = N'SleepingWithOpenTransactionCount'
+                 THEN ms.[MetricValue] END) AS [SleepingWithOpenTransactionCount]
+    FROM dbo.MetricSnapshot AS ms
+    WHERE ms.[SourceCollector] = N'Collect-Connections'
+      AND ms.[MetricCategory] = N'Connection'
+      AND ms.[ObjectName] = N'DatabaseConnectionPressure'
+    GROUP BY
+        ms.[InstanceId],
+        ms.[CaptureTime],
+        ms.[DatabaseName]
+)
+SELECT
+    mi.[InstanceId],
+    mi.[InstanceName],
+    mi.[EnvironmentName],
+    p.[CaptureTime],
+    p.[DatabaseName],
+    p.[TotalConnections],
+    p.[ActiveConnections],
+    p.[SleepingConnections],
+    p.[SleepingWithOpenTransactionCount]
+FROM P AS p
+INNER JOIN dbo.MonitoredInstances AS mi
+    ON mi.[InstanceId] = p.[InstanceId]
+WHERE mi.[IsEnabled] = 1;
+GO
+
+/*=============================================================================
+  Database Connection Pressure - Last 24 Hours
+=============================================================================*/
+CREATE OR ALTER VIEW rpt.vw_DatabaseConnectionPressure24Hours
+AS
+SELECT
+    d.[InstanceId],
+    d.[InstanceName],
+    d.[EnvironmentName],
+    d.[DatabaseName],
+    COUNT_BIG(*) AS [SamplesAboveThreshold],
+    MIN(d.[CaptureTime]) AS [FirstSeen],
+    MAX(d.[CaptureTime]) AS [LastSeen],
+    MAX(d.[TotalConnections]) AS [PeakTotalConnections],
+    CONVERT(decimal(19,2), AVG(CONVERT(decimal(19,2), d.[TotalConnections]))) AS [AvgTotalConnections],
+    MAX(d.[ActiveConnections]) AS [PeakActiveConnections],
+    MAX(d.[SleepingConnections]) AS [PeakSleepingConnections],
+    MAX(d.[SleepingWithOpenTransactionCount]) AS [PeakSleepingWithOpenTransactionCount]
+FROM rpt.vw_DatabaseConnectionPressureTrend AS d
+WHERE d.[CaptureTime] >= DATEADD(HOUR,-24,SYSDATETIME())
+GROUP BY
+    d.[InstanceId],
+    d.[InstanceName],
+    d.[EnvironmentName],
+    d.[DatabaseName];
+GO
