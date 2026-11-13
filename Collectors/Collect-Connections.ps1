@@ -17,6 +17,8 @@ $ErrorActionPreference = "Stop"
 $CollectorName = "Collect-Connections"
 $MaximumBreakdownRows = 100
 $MinimumBreakdownSessionCount = 2
+$DatabaseConnectionThreshold = 50
+$MaximumDatabaseRows = 25
 
 function Write-Info {
     param([string]$Message)
@@ -122,9 +124,19 @@ try {
 
     $QueryTimeout = 30
     if ($null -ne $config.Collectors -and
-        $null -ne $config.Collectors.Connections -and
-        $null -ne $config.Collectors.Connections.QueryTimeoutSeconds) {
-        $QueryTimeout = [int]$config.Collectors.Connections.QueryTimeoutSeconds
+        $null -ne $config.Collectors.Connections) {
+
+        if ($null -ne $config.Collectors.Connections.QueryTimeoutSeconds) {
+            $QueryTimeout = [int]$config.Collectors.Connections.QueryTimeoutSeconds
+        }
+
+        if ($config.Collectors.Connections.PSObject.Properties.Name -contains "DatabaseConnectionThreshold") {
+            $DatabaseConnectionThreshold = [int]$config.Collectors.Connections.DatabaseConnectionThreshold
+        }
+
+        if ($config.Collectors.Connections.PSObject.Properties.Name -contains "MaximumDatabaseRows") {
+            $MaximumDatabaseRows = [int]$config.Collectors.Connections.MaximumDatabaseRows
+        }
     }
 
     $SqlCredential = $null
@@ -229,15 +241,22 @@ GROUP BY program_name
 HAVING COUNT_BIG(1) >= $MinimumBreakdownSessionCount
 ORDER BY COUNT_BIG(1) DESC;
 
-SELECT TOP ($MaximumBreakdownRows)
+SELECT TOP ($MaximumDatabaseRows)
     SYSDATETIME() AS CaptureTime,
-    BreakdownType = 'Database',
+    BreakdownType = 'DatabasePressure',
     BreakdownValue = COALESCE(DB_NAME(database_id), '(unknown)'),
-    SessionCount = COUNT_BIG(1)
+    TotalConnections = COUNT_BIG(1),
+    ActiveConnections =
+        SUM(CASE WHEN status <> N'sleeping' THEN 1 ELSE 0 END),
+    SleepingConnections =
+        SUM(CASE WHEN status = N'sleeping' THEN 1 ELSE 0 END),
+    SleepingWithOpenTransactionCount =
+        SUM(CASE WHEN status = N'sleeping' AND open_transaction_count > 0 THEN 1 ELSE 0 END)
 FROM sys.dm_exec_sessions
 WHERE is_user_process = 1
+  AND database_id > 0
 GROUP BY database_id
-HAVING COUNT_BIG(1) >= $MinimumBreakdownSessionCount
+HAVING COUNT_BIG(1) >= $DatabaseConnectionThreshold
 ORDER BY COUNT_BIG(1) DESC;
 "@
 
@@ -258,6 +277,7 @@ ORDER BY COUNT_BIG(1) DESC;
                     @{ CounterName = "ActiveUserSessions"; Value = [decimal]$summaryRow.ActiveUserSessions },
                     @{ CounterName = "SleepingUserSessions"; Value = [decimal]$summaryRow.SleepingUserSessions },
                     @{ CounterName = "SleepingWithOpenTransactionCount"; Value = [decimal]$summaryRow.SleepingWithOpenTransactionCount },
+                    @{ CounterName = "DatabaseConnectionThreshold"; Value = [decimal]$DatabaseConnectionThreshold },
                     @{ CounterName = "DistinctLogins"; Value = [decimal]$summaryRow.DistinctLogins },
                     @{ CounterName = "DistinctHosts"; Value = [decimal]$summaryRow.DistinctHosts },
                     @{ CounterName = "DistinctApplications"; Value = [decimal]$summaryRow.DistinctApplications }
@@ -312,12 +332,65 @@ VALUES
                 foreach ($row in $sessionResults.Tables[$t].Rows) {
                     $breakdownType = [string]$row.BreakdownType
                     $breakdownValue = [string]$row.BreakdownValue
-                    $sessionCount = [decimal]$row.SessionCount
-
                     $safeBreakdownType = $breakdownType.Replace("'", "''")
                     $safeBreakdownValue = $breakdownValue.Replace("'", "''")
 
-                    $insertBreakdownQuery = @"
+                    if ($breakdownType -eq "DatabasePressure") {
+                        $databaseMetrics = @(
+                            @{ CounterName = "TotalConnections"; Value = [decimal]$row.TotalConnections },
+                            @{ CounterName = "ActiveConnections"; Value = [decimal]$row.ActiveConnections },
+                            @{ CounterName = "SleepingConnections"; Value = [decimal]$row.SleepingConnections },
+                            @{ CounterName = "SleepingWithOpenTransactionCount"; Value = [decimal]$row.SleepingWithOpenTransactionCount }
+                        )
+
+                        foreach ($databaseMetric in $databaseMetrics) {
+                            $safeCounterName = $databaseMetric.CounterName.Replace("'", "''")
+
+                            $insertDatabasePressureQuery = @"
+INSERT INTO dbo.MetricSnapshot
+(
+    InstanceId,
+    CaptureTime,
+    DatabaseName,
+    ObjectName,
+    CounterName,
+    InstanceName,
+    MetricCategory,
+    MetricValue,
+    MetricType,
+    Unit,
+    SourceCollector
+)
+VALUES
+(
+    $InstanceId,
+    '$captureTime',
+    N'$safeBreakdownValue',
+    N'DatabaseConnectionPressure',
+    N'$safeCounterName',
+    N'$safeBreakdownValue',
+    N'Connection',
+    $($databaseMetric.Value),
+    N'Gauge',
+    N'count',
+    N'$CollectorName'
+);
+"@
+
+                            Invoke-DbaQuery `
+                                -SqlInstance $CentralSqlInstance `
+                                -SqlCredential $SqlCredential `
+                                -Database $CentralDatabase `
+                                -Query $insertDatabasePressureQuery `
+                                -QueryTimeout 30 | Out-Null
+
+                            $RowsCollected++
+                        }
+                    }
+                    else {
+                        $sessionCount = [decimal]$row.SessionCount
+
+                        $insertBreakdownQuery = @"
 INSERT INTO dbo.MetricSnapshot
 (
     InstanceId,
@@ -340,22 +413,23 @@ VALUES
     N'ConnectionBreakdown',
     N'$safeBreakdownType',
     N'$safeBreakdownValue',
-    'Connection',
+    N'Connection',
     $sessionCount,
-    'Gauge',
-    'count',
-    '$CollectorName'
+    N'Gauge',
+    N'count',
+    N'$CollectorName'
 );
 "@
 
-                    Invoke-DbaQuery `
-                        -SqlInstance $CentralSqlInstance `
-                        -SqlCredential $SqlCredential `
-                        -Database $CentralDatabase `
-                        -Query $insertBreakdownQuery `
-                        -QueryTimeout 30 | Out-Null
+                        Invoke-DbaQuery `
+                            -SqlInstance $CentralSqlInstance `
+                            -SqlCredential $SqlCredential `
+                            -Database $CentralDatabase `
+                            -Query $insertBreakdownQuery `
+                            -QueryTimeout 30 | Out-Null
 
-                    $RowsCollected++
+                        $RowsCollected++
+                    }
                 }
             }
 
