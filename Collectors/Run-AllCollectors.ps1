@@ -14,6 +14,7 @@ Set-DbatoolsConfig -FullName 'sql.connection.trustcert' -Value $true
 
 
 $Collectors = @(
+    ".\Collectors\Collect-InstanceConfiguration.ps1",
     ".\Collectors\Collect-PerformanceCounters.ps1",
     ".\Collectors\Collect-DatabaseIO.ps1",
     ".\Collectors\Collect-WaitStats.ps1",
