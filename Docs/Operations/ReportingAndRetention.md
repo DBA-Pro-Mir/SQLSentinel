@@ -164,3 +164,21 @@ The view exposes allocated data and log size and file counts. Historical reposit
 ## Important safety rule
 
 Do not execute repository cleanup for the first time without a current SQLMonitoring backup. The initial run may delete a larger historical volume than subsequent scheduled runs.
+
+
+## Backup protection details (Power BI)
+
+Deploy the standalone view script after the reporting foundation is installed:
+
+```sql
+-- Open and execute Database/Views/Create-BackupProtectionDetailsCurrent.sql
+-- against the SQLMonitoring database.
+SELECT [InstanceName], [DatabaseName], [IssueType], [Severity], [CaptureTime], [Details]
+FROM [rpt].[vw_BackupProtectionDetailsCurrent]
+WHERE [InstanceName] = N'WE-PRD-SQL-17'
+ORDER BY [DatabaseName];
+```
+
+The view uses the latest **summary** capture per instance from `dbo.MetricSnapshot` and exposes corresponding issue-detail records from `dbo.MetricTextSnapshot`. The collector currently caps detail rows at `MaximumDetailRows` (200 by default), so the view may not represent all affected databases on large servers. `FullBackupAgeHours` reflects the collector's `NumericValue1`, which records FULL backup age even for other issue types.
+
+This is a standalone incremental deployment script: the repository bootstrap script does not automatically deploy this view. Deploy it explicitly in SQLMonitoring and import it into Power BI afterward.
