@@ -179,6 +179,6 @@ WHERE [InstanceName] = N'WE-PRD-SQL-17'
 ORDER BY [DatabaseName];
 ```
 
-The view uses the latest **summary** capture per instance from `dbo.MetricSnapshot` and exposes corresponding issue-detail records from `dbo.MetricTextSnapshot`. The collector currently caps detail rows at `MaximumDetailRows` (200 by default), so the view may not represent all affected databases on large servers. `FullBackupAgeHours` reflects the collector's `NumericValue1`, which records FULL backup age even for other issue types.
+The view uses the latest **summary** capture per instance from `dbo.MetricSnapshot` and exposes corresponding issue-detail records from `dbo.MetricTextSnapshot`. The updated collector evaluates every online user database, stores only detected violations, and emits one detail row per violation (including multiple violations on one database). `IssueAgeHours` is the age relevant to that issue for new captures; missing-backup and recovery-model issues have no applicable age and are stored as zero in the existing numeric snapshot field. Earlier captures were capped at 200 and their numeric values represent FULL backup age, so interpret historical captures with care.
 
 This is a standalone incremental deployment script: the repository bootstrap script does not automatically deploy this view. Deploy it explicitly in SQLMonitoring and import it into Power BI afterward.
