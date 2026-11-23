@@ -412,6 +412,16 @@ VALUES
             }
 
             if ($results.Tables.Count -gt 1) {
+                $detailBatchSize = 50
+                $detailValues = New-Object 'System.Collections.Generic.List[string]'
+                $detailInsertPrefix = @"
+INSERT INTO [dbo].[MetricTextSnapshot]
+(
+    [InstanceId], [CaptureTime], [DatabaseName], [MetricCategory],
+    [DetailType], [Severity], [NumericValue1], [Details], [SourceCollector]
+)
+VALUES
+"@
                 foreach ($issue in $results.Tables[1].Rows) {
 
                     $dbName = if ([string]::IsNullOrWhiteSpace([string]$issue.DatabaseName)) { "(unknown)" } else { [string]$issue.DatabaseName }
@@ -451,39 +461,39 @@ LastLogBackupDevice: $($issue.LastLogBackupDevice)
                     $safeSeverity = $severity.Replace("'", "''")
                     $numericValue1 = if ($null -eq $issue.IssueAgeHours -or [string]::IsNullOrWhiteSpace([string]$issue.IssueAgeHours)) { 0 } else { [decimal]$issue.IssueAgeHours }
 
+                    $detailValues.Add("($InstanceId, '$captureTime', N'$safeDbName', N'BackupCompliance', N'$safeIssueType', N'$safeSeverity', $numericValue1, N'$safeDetails', N'$CollectorName')")
+
+                    if ($detailValues.Count -ge $detailBatchSize) {
+                        $detailInsertSql = $detailInsertPrefix + [Environment]::NewLine +
+                            ($detailValues -join ("," + [Environment]::NewLine)) + ";"
+
+                        Invoke-DbaQuery `
+                            -SqlInstance $CentralSqlInstance `
+                            -SqlCredential $SqlCredential `
+                            -Database $CentralDatabase `
+                            -Query $detailInsertSql `
+                            -QueryTimeout $QueryTimeout `
+                            -EnableException | Out-Null
+
+                        $RowsCollected += $detailValues.Count
+                        $detailValues.Clear()
+                    }
+                }
+
+                if ($detailValues.Count -gt 0) {
+                    $detailInsertSql = $detailInsertPrefix + [Environment]::NewLine +
+                        ($detailValues -join ("," + [Environment]::NewLine)) + ";"
+
                     Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
                         -SqlCredential $SqlCredential `
                         -Database $CentralDatabase `
-                        -Query @"
-INSERT INTO dbo.MetricTextSnapshot
-(
-    InstanceId,
-    CaptureTime,
-    DatabaseName,
-    MetricCategory,
-    DetailType,
-    Severity,
-    NumericValue1,
-    Details,
-    SourceCollector
-)
-VALUES
-(
-    $InstanceId,
-    '$captureTime',
-    N'$safeDbName',
-    'BackupCompliance',
-    '$safeIssueType',
-    '$safeSeverity',
-    $numericValue1,
-    N'$safeDetails',
-    '$CollectorName'
-);
-"@ `
-                        -QueryTimeout $QueryTimeout | Out-Null
+                        -Query $detailInsertSql `
+                        -QueryTimeout $QueryTimeout `
+                        -EnableException | Out-Null
 
-                    $RowsCollected++
+                    $RowsCollected += $detailValues.Count
+                    $detailValues.Clear()
                 }
             }
 
