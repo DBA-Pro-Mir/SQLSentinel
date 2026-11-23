@@ -97,7 +97,6 @@ try {
     $FullBackupWarningHours = 24
     $DiffBackupWarningHours = 24
     $LogBackupWarningHours = 2
-    $MaximumDetailRows = 200
 
     if ($null -ne $config.Collectors -and
         $config.Collectors.PSObject.Properties.Name -contains "Backups") {
@@ -120,9 +119,6 @@ try {
             $LogBackupWarningHours = [int]$backupConfig.LogBackupWarningHours
         }
 
-        if ($backupConfig.PSObject.Properties.Name -contains "MaximumDetailRows") {
-            $MaximumDetailRows = [int]$backupConfig.MaximumDetailRows
-        }
     }
 
     $SqlCredential = $null
@@ -289,71 +285,52 @@ SELECT
         ISNULL(MAX(ISNULL(LastLogBackupAgeHours, 0)), 0)
 FROM #BackupStatus;
 
-SELECT TOP ($MaximumDetailRows)
-    DatabaseName,
-    recovery_model_desc,
-    ComplianceProfile,
-    ExpectedRecoveryModel,
-    RequiresDiffBackups,
-    RequiresLogBackups,
-    LastFullBackupTime,
-    LastDiffBackupTime,
-    LastLogBackupTime,
-    LastFullBackupAgeHours,
-    LastDiffBackupAgeHours,
-    LastLogBackupAgeHours,
-    LastFullBackupSizeMB,
-    LastDiffBackupSizeMB,
-    LastLogBackupSizeMB,
-    LastFullBackupDurationSeconds,
-    LastDiffBackupDurationSeconds,
-    LastLogBackupDurationSeconds,
-    LastFullBackupDevice,
-    LastDiffBackupDevice,
-    LastLogBackupDevice,
-    IssueType =
-        CASE
-            WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 'RecoveryModelMismatch'
-            WHEN LastFullBackupTime IS NULL THEN 'MissingFullBackup'
-            WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'OldFullBackup'
-            WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 'MissingDiffBackup'
-            WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 'OldDiffBackup'
-            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'MissingLogBackup'
-            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'OldLogBackup'
-            ELSE 'OK'
-        END,
-    Severity =
-        CASE
-            WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 'Critical'
-            WHEN LastFullBackupTime IS NULL THEN 'Critical'
-            WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 'Warning'
-            WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 'Critical'
-            WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 'Warning'
-            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 'Critical'
-            WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 'Critical'
-            ELSE 'Info'
-        END
-FROM #BackupStatus
-WHERE
-    recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT
-    OR LastFullBackupTime IS NULL
-    OR LastFullBackupAgeHours > $FullBackupWarningHours
-    OR (RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL)
-    OR (RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours)
-    OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL)
-    OR (RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours)
-ORDER BY
-    CASE
-        WHEN recovery_model_desc COLLATE DATABASE_DEFAULT <> ExpectedRecoveryModel COLLATE DATABASE_DEFAULT THEN 1
-        WHEN LastFullBackupTime IS NULL THEN 2
-        WHEN RequiresDiffBackups = 1 AND LastDiffBackupTime IS NULL THEN 3
-        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupTime IS NULL THEN 4
-        WHEN RequiresLogBackups = 1 AND recovery_model_desc IN ('FULL','BULK_LOGGED') AND LastLogBackupAgeHours > $LogBackupWarningHours THEN 5
-        WHEN RequiresDiffBackups = 1 AND LastDiffBackupAgeHours > $DiffBackupWarningHours THEN 6
-        WHEN LastFullBackupAgeHours > $FullBackupWarningHours THEN 7
-        ELSE 99
-    END,
-    DatabaseName;
+SELECT
+    [b].[DatabaseName],
+    [b].[recovery_model_desc],
+    [b].[ComplianceProfile],
+    [b].[ExpectedRecoveryModel],
+    [b].[RequiresDiffBackups],
+    [b].[RequiresLogBackups],
+    [b].[LastFullBackupTime],
+    [b].[LastDiffBackupTime],
+    [b].[LastLogBackupTime],
+    [b].[LastFullBackupAgeHours],
+    [b].[LastDiffBackupAgeHours],
+    [b].[LastLogBackupAgeHours],
+    [b].[LastFullBackupSizeMB],
+    [b].[LastDiffBackupSizeMB],
+    [b].[LastLogBackupSizeMB],
+    [b].[LastFullBackupDurationSeconds],
+    [b].[LastDiffBackupDurationSeconds],
+    [b].[LastLogBackupDurationSeconds],
+    [b].[LastFullBackupDevice],
+    [b].[LastDiffBackupDevice],
+    [b].[LastLogBackupDevice],
+    [i].[IssueType],
+    [i].[Severity],
+    [i].[IssueAgeHours]
+FROM #BackupStatus AS [b]
+CROSS APPLY
+(
+    VALUES
+        ('RecoveryModelMismatch', 'Critical', CAST(NULL AS int),
+            CASE WHEN [b].[recovery_model_desc] COLLATE DATABASE_DEFAULT <> [b].[ExpectedRecoveryModel] COLLATE DATABASE_DEFAULT THEN 1 ELSE 0 END),
+        ('MissingFullBackup', 'Critical', CAST(NULL AS int),
+            CASE WHEN [b].[LastFullBackupTime] IS NULL THEN 1 ELSE 0 END),
+        ('OldFullBackup', 'Warning', [b].[LastFullBackupAgeHours],
+            CASE WHEN [b].[LastFullBackupAgeHours] > $FullBackupWarningHours THEN 1 ELSE 0 END),
+        ('MissingDiffBackup', 'Critical', CAST(NULL AS int),
+            CASE WHEN [b].[RequiresDiffBackups] = 1 AND [b].[LastDiffBackupTime] IS NULL THEN 1 ELSE 0 END),
+        ('OldDiffBackup', 'Warning', [b].[LastDiffBackupAgeHours],
+            CASE WHEN [b].[RequiresDiffBackups] = 1 AND [b].[LastDiffBackupAgeHours] > $DiffBackupWarningHours THEN 1 ELSE 0 END),
+        ('MissingLogBackup', 'Critical', CAST(NULL AS int),
+            CASE WHEN [b].[RequiresLogBackups] = 1 AND [b].[recovery_model_desc] IN ('FULL','BULK_LOGGED') AND [b].[LastLogBackupTime] IS NULL THEN 1 ELSE 0 END),
+        ('OldLogBackup', 'Critical', [b].[LastLogBackupAgeHours],
+            CASE WHEN [b].[RequiresLogBackups] = 1 AND [b].[recovery_model_desc] IN ('FULL','BULK_LOGGED') AND [b].[LastLogBackupAgeHours] > $LogBackupWarningHours THEN 1 ELSE 0 END)
+) AS [i]([IssueType], [Severity], [IssueAgeHours], [IsViolation])
+WHERE [i].[IsViolation] = 1
+ORDER BY [b].[DatabaseName], [i].[IssueType];
 
 DROP TABLE #BackupStatus;
 "@
@@ -453,6 +430,7 @@ RequiresLogBackups: $($issue.RequiresLogBackups)
 LastFullBackupTime: $($issue.LastFullBackupTime)
 LastDiffBackupTime: $($issue.LastDiffBackupTime)
 LastLogBackupTime: $($issue.LastLogBackupTime)
+IssueAgeHours: $($issue.IssueAgeHours)
 LastFullBackupAgeHours: $($issue.LastFullBackupAgeHours)
 LastDiffBackupAgeHours: $($issue.LastDiffBackupAgeHours)
 LastLogBackupAgeHours: $($issue.LastLogBackupAgeHours)
@@ -471,7 +449,7 @@ LastLogBackupDevice: $($issue.LastLogBackupDevice)
                     $safeDbName = $dbName.Replace("'", "''")
                     $safeIssueType = $issueType.Replace("'", "''")
                     $safeSeverity = $severity.Replace("'", "''")
-                    $numericValue1 = if ($null -eq $issue.LastFullBackupAgeHours -or [string]::IsNullOrWhiteSpace([string]$issue.LastFullBackupAgeHours)) { 0 } else { [decimal]$issue.LastFullBackupAgeHours }
+                    $numericValue1 = if ($null -eq $issue.IssueAgeHours -or [string]::IsNullOrWhiteSpace([string]$issue.IssueAgeHours)) { 0 } else { [decimal]$issue.IssueAgeHours }
 
                     Invoke-DbaQuery `
                         -SqlInstance $CentralSqlInstance `
