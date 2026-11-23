@@ -8,8 +8,11 @@ GO
 /*
  SQLSentinel - Database-level backup protection details (latest collector run)
  Source: dbo.MetricTextSnapshot, joined to the latest backup summary capture.
- Important: Collect-Backups currently limits detail collection to MaximumDetailRows
- (default 200) per instance/run; this view does not invent omitted records.
+ Each row represents one backup or recovery-model violation. The collector
+ evaluates all online user databases and stores only violation details.
+ Historical captures from earlier collector versions may be incomplete.
+ NumericValue1 represents issue-specific age for new captures; historical
+ records used FULL age regardless of issue type.
 */
 CREATE OR ALTER VIEW [rpt].[vw_BackupProtectionDetailsCurrent]
 AS
@@ -32,7 +35,7 @@ SELECT
     [mts].[DatabaseName],
     [IssueType] = [mts].[DetailType],
     [mts].[Severity],
-    [FullBackupAgeHours] = [mts].[NumericValue1],
+    [IssueAgeHours] = [mts].[NumericValue1],
     [mts].[CaptureTime],
     [mts].[Details]
 FROM [dbo].[MetricTextSnapshot] AS [mts]
