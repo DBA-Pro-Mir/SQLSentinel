@@ -175,10 +175,15 @@ ORDER BY InstanceName;
 
             $backupQuery = @"
 DECLARE @ComplianceProfile varchar(20) = '$safeComplianceProfile';
+
+IF @ComplianceProfile NOT IN ('V1_SIMPLE', 'V2_FULL', 'V3_ARCHIVE_FULL')
+BEGIN
+    THROW 50010, 'Unsupported SQLSentinel backup compliance profile.', 1;
+END;
 DECLARE @ExpectedRecoveryModel varchar(20) =
     CASE
         WHEN @ComplianceProfile = 'V2_FULL' THEN 'FULL'
-        ELSE 'SIMPLE'
+        WHEN @ComplianceProfile IN ('V1_SIMPLE', 'V3_ARCHIVE_FULL') THEN 'SIMPLE'
     END;
 DECLARE @RequiresDiffBackups bit =
     CASE

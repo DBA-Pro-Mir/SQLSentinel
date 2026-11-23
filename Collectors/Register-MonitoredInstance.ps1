@@ -21,6 +21,10 @@ param
     [string]$CollectionProfile = "Standard",
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet("V1_SIMPLE", "V2_FULL", "V3_ARCHIVE_FULL")]
+    [string]$ComplianceProfile,
+
+    [Parameter(Mandatory = $false)]
     [string]$Notes = "",
 
     [Parameter(Mandatory = $false)]
@@ -196,6 +200,7 @@ SELECT
     $safeInstanceName = $InstanceName.Replace("'", "''")
     $safeEnvironmentName = $EnvironmentName.Replace("'", "''")
     $safeCollectionProfile = $CollectionProfile.Replace("'", "''")
+    $safeComplianceProfile = if ([string]::IsNullOrWhiteSpace($ComplianceProfile)) { "" } else { $ComplianceProfile.Replace("'", "''") }
     $safeNotes = $Notes.Replace("'", "''")
 
     $registerQuery = @"
@@ -210,6 +215,7 @@ BEGIN
     SET
         EnvironmentName = N'$safeEnvironmentName',
         CollectionProfile = N'$safeCollectionProfile',
+        ComplianceProfile = COALESCE(NULLIF(N'$safeComplianceProfile', N''), ComplianceProfile),
         Notes = N'$safeNotes',
         IsEnabled = 1,
         ModifiedAt = SYSDATETIME()
@@ -222,6 +228,7 @@ BEGIN
         InstanceName,
         EnvironmentName,
         CollectionProfile,
+        ComplianceProfile,
         IsEnabled,
         Notes
     )
@@ -230,6 +237,7 @@ BEGIN
         N'$safeInstanceName',
         N'$safeEnvironmentName',
         N'$safeCollectionProfile',
+        COALESCE(NULLIF(N'$safeComplianceProfile', N''), N'V1_SIMPLE'),
         1,
         N'$safeNotes'
     );
@@ -240,6 +248,7 @@ SELECT
     InstanceName,
     EnvironmentName,
     CollectionProfile,
+    ComplianceProfile,
     IsEnabled,
     Notes
 FROM dbo.MonitoredInstances

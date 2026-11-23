@@ -19,8 +19,8 @@ param
     [string]$CollectionProfile = "Standard",
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet("V1_SIMPLE", "V2_FULL")]
-    [string]$ComplianceProfile = "V1_SIMPLE",
+    [ValidateSet("V1_SIMPLE", "V2_FULL", "V3_ARCHIVE_FULL")]
+    [string]$ComplianceProfile,
 
     [Parameter(Mandatory = $false)]
     [string]$Notes = "",
@@ -71,7 +71,7 @@ try {
     Write-Info "Target instance: $SqlInstance"
     Write-Info "Repository: $CentralSqlInstance / $CentralDatabase"
     Write-Info "Collection profile: $CollectionProfile"
-    Write-Info "Backup compliance profile: $ComplianceProfile"
+    Write-Info "Backup compliance profile: $(if ($ComplianceProfile) { $ComplianceProfile } else { 'Preserve existing / V1_SIMPLE for new instances' })"
 
     Write-Info "Testing SQL connectivity"
 
@@ -149,7 +149,7 @@ FROM sys.dm_os_sys_info AS osi;
     $safeInstanceName = $SqlInstance.Replace("'", "''")
     $safeEnvironmentName = $EnvironmentName.Replace("'", "''")
     $safeCollectionProfile = $CollectionProfile.Replace("'", "''")
-    $safeComplianceProfile = $ComplianceProfile.Replace("'", "''")
+    $safeComplianceProfile = if ([string]::IsNullOrWhiteSpace($ComplianceProfile)) { "" } else { $ComplianceProfile.Replace("'", "''") }
     $safeNotes = $Notes.Replace("'", "''")
     $safeSqlVersion = ([string]$server.ProductVersion).Replace("'", "''")
     $safeEdition = ([string]$server.Edition).Replace("'", "''")
@@ -187,7 +187,7 @@ BEGIN
         EnvironmentName = N'$safeEnvironmentName',
         IsEnabled = 1,
         CollectionProfile = N'$safeCollectionProfile',
-        ComplianceProfile = N'$safeComplianceProfile',
+        ComplianceProfile = COALESCE(NULLIF(N'$safeComplianceProfile', N''), ComplianceProfile),
         SqlVersion = N'$safeSqlVersion',
         Edition = N'$safeEdition',
         Notes = N'$safeNotes',
@@ -215,7 +215,7 @@ BEGIN
         N'$safeEnvironmentName',
         1,
         N'$safeCollectionProfile',
-        N'$safeComplianceProfile',
+        COALESCE(NULLIF(N'$safeComplianceProfile', N''), N'V1_SIMPLE'),
         N'$safeSqlVersion',
         N'$safeEdition',
         N'$safeNotes',

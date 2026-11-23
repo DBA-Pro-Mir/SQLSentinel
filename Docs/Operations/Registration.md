@@ -37,7 +37,7 @@ The following are required:
 | `SqlInstance` | Yes | SQL Server instance name to register |
 | `EnvironmentName` | Yes | Environment classification such as PROD, DEV, BETA, or Admin |
 | `CollectionProfile` | No | Collector profile. Default is `Standard` |
-| `ComplianceProfile` | No | Backup compliance policy. Valid values: `V1_SIMPLE`, `V2_FULL`. Default is `V1_SIMPLE` |
+| `ComplianceProfile` | No | Backup compliance policy. Valid values: `V1_SIMPLE`, `V2_FULL`, `V3_ARCHIVE_FULL`. Existing registration preserves the current profile if omitted; new registrations default to `V1_SIMPLE` |
 | `Notes` | No | Operational description of the instance |
 | `ConfigPath` | No | Path to SQLSentinel runtime configuration |
 
@@ -66,6 +66,29 @@ Expected behavior:
 - Full backup compliance is evaluated
 - Transaction log backups are required
 - Differential backup age is evaluated according to collector configuration
+
+### V3_ARCHIVE_FULL
+
+Use for archive instances that require FULL backups only.
+
+- Expected recovery model: `SIMPLE`
+- FULL backups required, with a 24-hour warning threshold (existing default collector setting)
+- DIFFERENTIAL backups not required
+- LOG backups not required
+- Unsupported profiles are rejected by the backup collector
+
+## Registration example: archive FULL-only profile
+
+```powershell
+.\Administration\Register-MonitoredInstance.ps1 `
+    -SqlInstance "EC-PRD-SQL-36" `
+    -EnvironmentName "PROD" `
+    -CollectionProfile "Standard" `
+    -ComplianceProfile "V3_ARCHIVE_FULL" `
+    -Notes "Archive server - SIMPLE recovery, FULL backups only"
+```
+
+Do not run this registration command until the collector and registration code have been reviewed and deployed. A registration updates metadata for an existing instance. Both registration scripts preserve an existing compliance profile if the parameter is omitted.
 
 ## Registration example: SIMPLE profile
 
