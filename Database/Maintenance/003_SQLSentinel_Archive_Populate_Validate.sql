@@ -139,10 +139,27 @@ BEGIN
         GROUP BY InstanceId;
 
         INSERT dbo.SQLSentinelRollupAudit
-        ([RollupDate],[SourceTable],[SourceRows],[SummaryRows],[CompletedAt])
+        ([RollupDate],[SourceTable],[SourceRows],[SummaryRows],[MaxSourceId],[CompletedAt])
         SELECT @RollupDate,[c].[SourceTable],[c].[RowCount],
                (SELECT COUNT_BIG(*) FROM dbo.SQLSentinelDailyRollup AS [r]
                  WHERE [r].[RollupDate]=@RollupDate AND [r].[SourceTable]=[c].[SourceTable]),
+               CASE [c].[SourceTable]
+                 WHEN 'MetricSnapshot' THEN
+                     (SELECT ISNULL(MAX(MetricSnapshotId),0) FROM dbo.MetricSnapshot
+                      WHERE CaptureTime>=@From AND CaptureTime<@To)
+                 WHEN 'MetricTextSnapshot' THEN
+                     (SELECT ISNULL(MAX(MetricTextSnapshotId),0) FROM dbo.MetricTextSnapshot
+                      WHERE CaptureTime>=@From AND CaptureTime<@To)
+                 WHEN 'CollectionRunHistory' THEN
+                     (SELECT ISNULL(MAX(CollectionRunId),0) FROM dbo.CollectionRunHistory
+                      WHERE StartedAt>=@From AND StartedAt<@To)
+                 WHEN 'DatabaseCapacitySnapshot' THEN
+                     (SELECT ISNULL(MAX(DatabaseCapacitySnapshotId),0) FROM dbo.DatabaseCapacitySnapshot
+                      WHERE CaptureTime>=@From AND CaptureTime<@To)
+                 WHEN 'VolumeCapacitySnapshot' THEN
+                     (SELECT ISNULL(MAX(VolumeCapacitySnapshotId),0) FROM dbo.VolumeCapacitySnapshot
+                      WHERE CaptureTime>=@From AND CaptureTime<@To)
+               END,
                SYSDATETIME()
         FROM #Counts AS [c];
 
@@ -157,7 +174,7 @@ BEGIN
         COMMIT TRANSACTION;
         EXEC sys.sp_releaseapplock @Resource=N'SQLSentinelArchiveDaily',@LockOwner='Session';
 
-        SELECT [RollupDate],[SourceTable],[SourceRows],[SummaryRows],[CompletedAt]
+        SELECT [RollupDate],[SourceTable],[SourceRows],[SummaryRows],[MaxSourceId],[CompletedAt]
         FROM dbo.SQLSentinelRollupAudit WHERE RollupDate=@RollupDate
         ORDER BY SourceTable;
     END TRY
@@ -205,7 +222,7 @@ BEGIN
         GROUP BY CONVERT(date,CaptureTime)
     )
     SELECT [s].[RollupDate],[s].[SourceTable],[s].[SourceRows],
-           [a].[SourceRows] AS [ArchivedSourceRows],[a].[SummaryRows],
+           [a].[SourceRows] AS [ArchivedSourceRows],[a].[SummaryRows],[a].[MaxSourceId],
            [a].[CompletedAt],
            CASE WHEN [a].[RollupDate] IS NULL THEN N'MISSING'
                 WHEN [a].[SourceRows]<>[s].[SourceRows] THEN N'STALE'
