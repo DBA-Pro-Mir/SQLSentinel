@@ -201,31 +201,32 @@ BEGIN
     ;WITH [SourceCounts] AS
     (
         SELECT CONVERT(date,CaptureTime) AS [RollupDate],
-               CONVERT(varchar(40),'MetricSnapshot') AS [SourceTable],COUNT_BIG(*) AS [SourceRows]
+               CONVERT(varchar(40),'MetricSnapshot') AS [SourceTable],
+               COUNT_BIG(*) AS [SourceRows],MAX(MetricSnapshotId) AS [MaxSourceId]
         FROM dbo.MetricSnapshot WHERE CaptureTime>=@FromDate AND CaptureTime<@End
         GROUP BY CONVERT(date,CaptureTime)
         UNION ALL
-        SELECT CONVERT(date,CaptureTime),'MetricTextSnapshot',COUNT_BIG(*)
+        SELECT CONVERT(date,CaptureTime),'MetricTextSnapshot',COUNT_BIG(*),MAX(MetricTextSnapshotId)
         FROM dbo.MetricTextSnapshot WHERE CaptureTime>=@FromDate AND CaptureTime<@End
         GROUP BY CONVERT(date,CaptureTime)
         UNION ALL
-        SELECT CONVERT(date,StartedAt),'CollectionRunHistory',COUNT_BIG(*)
+        SELECT CONVERT(date,StartedAt),'CollectionRunHistory',COUNT_BIG(*),MAX(CollectionRunId)
         FROM dbo.CollectionRunHistory WHERE StartedAt>=@FromDate AND StartedAt<@End
         GROUP BY CONVERT(date,StartedAt)
         UNION ALL
-        SELECT CONVERT(date,CaptureTime),'DatabaseCapacitySnapshot',COUNT_BIG(*)
+        SELECT CONVERT(date,CaptureTime),'DatabaseCapacitySnapshot',COUNT_BIG(*),MAX(DatabaseCapacitySnapshotId)
         FROM dbo.DatabaseCapacitySnapshot WHERE CaptureTime>=@FromDate AND CaptureTime<@End
         GROUP BY CONVERT(date,CaptureTime)
         UNION ALL
-        SELECT CONVERT(date,CaptureTime),'VolumeCapacitySnapshot',COUNT_BIG(*)
+        SELECT CONVERT(date,CaptureTime),'VolumeCapacitySnapshot',COUNT_BIG(*),MAX(VolumeCapacitySnapshotId)
         FROM dbo.VolumeCapacitySnapshot WHERE CaptureTime>=@FromDate AND CaptureTime<@End
         GROUP BY CONVERT(date,CaptureTime)
     )
     SELECT [s].[RollupDate],[s].[SourceTable],[s].[SourceRows],
-           [a].[SourceRows] AS [ArchivedSourceRows],[a].[SummaryRows],[a].[MaxSourceId],
+           [a].[SourceRows] AS [ArchivedSourceRows],[s].[MaxSourceId] AS [CurrentMaxSourceId],[a].[SummaryRows],[a].[MaxSourceId] AS [ArchivedMaxSourceId],
            [a].[CompletedAt],
            CASE WHEN [a].[RollupDate] IS NULL THEN N'MISSING'
-                WHEN [a].[SourceRows]<>[s].[SourceRows] THEN N'STALE'
+                WHEN [a].[SourceRows]<[s].[SourceRows] OR [a].[MaxSourceId]<[s].[MaxSourceId] THEN N'STALE'
                 WHEN [s].[SourceRows]>0 AND [a].[SummaryRows]=0 THEN N'EMPTY'
                 ELSE N'OK' END AS [CoverageStatus]
     FROM [SourceCounts] AS [s]
