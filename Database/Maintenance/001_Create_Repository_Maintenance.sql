@@ -49,8 +49,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_SQLSentinelRepositoryCleanup
     @DatabaseCapacityRetentionDays   int = 90,
     @VolumeCapacityRetentionDays     int = 90,
     @BatchSize                       int = 10000,
-    @DryRun                          bit = 1,
-    @RequireArchiveCoverage          bit = 1
+    @DryRun                          bit = 1
 )
 AS
 BEGIN
@@ -146,7 +145,7 @@ BEGIN
          AND [a].[SourceTable]=[p].[SourceTable]
         WHERE [a].[RollupDate] IS NULL
            OR [a].[SummaryRows]=0
-           OR [a].[SourceRows] <> CASE [p].[SourceTable]
+           OR [a].[SourceRows] < CASE [p].[SourceTable]
                 WHEN 'MetricSnapshot' THEN
                     (SELECT COUNT_BIG(*) FROM dbo.MetricSnapshot AS [s]
                       WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
@@ -169,7 +168,7 @@ BEGIN
                         AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
              END;
 
-        IF @RequireArchiveCoverage=1 AND EXISTS (SELECT 1 FROM #CoverageFailures)
+        IF @DryRun=0 AND EXISTS (SELECT 1 FROM #CoverageFailures)
         BEGIN
             SELECT TOP (100) [RollupDate],[SourceTable],[Reason]
             FROM #CoverageFailures ORDER BY [RollupDate],[SourceTable];
@@ -179,6 +178,7 @@ BEGIN
         /* Dry-run reports candidate deletion counts; no rows deleted. */
     IF @DryRun = 1
     BEGIN
+        SELECT [RollupDate],[SourceTable],[Reason] FROM #CoverageFailures ORDER BY [RollupDate],[SourceTable];
         SELECT
             N'MetricSnapshot' AS [TableName],
             COUNT_BIG(*) AS [RowsToDelete],
