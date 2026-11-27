@@ -49,7 +49,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_SQLSentinelRepositoryCleanup
     @DatabaseCapacityRetentionDays   int = 90,
     @VolumeCapacityRetentionDays     int = 90,
     @BatchSize                       int = 10000,
-    @DryRun                          bit = 1
+    @DryRun                          bit = 1,
+    @RequireArchiveCoverage          bit = 1
 )
 AS
 BEGIN
@@ -78,6 +79,104 @@ BEGIN
         @VolumeCapacityCutoff     datetime2(0) = DATEADD(DAY, -@VolumeCapacityRetentionDays, SYSDATETIME()),
         @RowsDeleted              int;
 
+    /* Archive protection: all candidate days with source rows must have a
+       completed, matching daily rollup. No override is provided for deletes:
+       archiving is part of the retention contract. */
+    IF OBJECT_ID(N'dbo.SQLSentinelRollupAudit',N'U') IS NULL
+        THROW 50160,'Archive audit missing. Deploy archive schema before cleanup.',1;
+
+    DECLARE @LockResult int;
+    EXEC @LockResult=sys.sp_getapplock
+        @Resource=N'SQLSentinelArchiveDaily',@LockMode='Exclusive',
+        @LockOwner='Session',@LockTimeout=0;
+    IF @LockResult<0 THROW 50161,'Archive or cleanup is already running.',1;
+
+    BEGIN TRY
+        /* For each source, check actual candidate rows up to its cutoff.
+           MetricText has two cutoffs: operational-event categories expire at
+           30 days, remaining details at the configured text-retention age. */
+        CREATE TABLE #PendingArchive
+        (
+            [RollupDate] date NOT NULL,
+            [SourceTable] varchar(40) NOT NULL,
+            [SourceRows] bigint NOT NULL,
+            PRIMARY KEY ([RollupDate],[SourceTable])
+        );
+
+        INSERT #PendingArchive ([RollupDate],[SourceTable],[SourceRows])
+        SELECT CONVERT(date,[CaptureTime]),'MetricSnapshot',COUNT_BIG(*)
+        FROM dbo.MetricSnapshot WHERE [CaptureTime]<@MetricCutoff
+        GROUP BY CONVERT(date,[CaptureTime])
+        UNION ALL
+        SELECT CONVERT(date,[CaptureTime]),'MetricTextSnapshot',COUNT_BIG(*)
+        FROM dbo.MetricTextSnapshot
+        WHERE ([CaptureTime]<@TextMetricCutoff)
+           OR ([CaptureTime]<@OperationalEventCutoff
+               AND [MetricCategory] IN (N'SqlAgentJob',N'SqlAgentAlert',N'SqlErrorLog'))
+        GROUP BY CONVERT(date,[CaptureTime])
+        UNION ALL
+        SELECT CONVERT(date,[StartedAt]),'CollectionRunHistory',COUNT_BIG(*)
+        FROM dbo.CollectionRunHistory WHERE [StartedAt]<@CollectionRunCutoff
+        GROUP BY CONVERT(date,[StartedAt])
+        UNION ALL
+        SELECT CONVERT(date,[CaptureTime]),'DatabaseCapacitySnapshot',COUNT_BIG(*)
+        FROM dbo.DatabaseCapacitySnapshot WHERE [CaptureTime]<@DatabaseCapacityCutoff
+        GROUP BY CONVERT(date,[CaptureTime])
+        UNION ALL
+        SELECT CONVERT(date,[CaptureTime]),'VolumeCapacitySnapshot',COUNT_BIG(*)
+        FROM dbo.VolumeCapacitySnapshot WHERE [CaptureTime]<@VolumeCapacityCutoff
+        GROUP BY CONVERT(date,[CaptureTime]);
+
+        /* Audit SourceRows counts the entire date, not just candidates before
+           a cutoff that may fall in the middle of a calendar day. */
+        CREATE TABLE #CoverageFailures
+        (
+            [RollupDate] date NOT NULL,[SourceTable] varchar(40) NOT NULL,
+            [Reason] varchar(30) NOT NULL
+        );
+
+        INSERT #CoverageFailures ([RollupDate],[SourceTable],[Reason])
+        SELECT [p].[RollupDate],[p].[SourceTable],
+            CASE WHEN [a].[RollupDate] IS NULL THEN 'MISSING'
+                 WHEN [a].[SummaryRows]=0 THEN 'EMPTY'
+                 ELSE 'STALE' END
+        FROM #PendingArchive AS [p]
+        LEFT JOIN dbo.SQLSentinelRollupAudit AS [a]
+          ON [a].[RollupDate]=[p].[RollupDate]
+         AND [a].[SourceTable]=[p].[SourceTable]
+        WHERE [a].[RollupDate] IS NULL
+           OR [a].[SummaryRows]=0
+           OR [a].[SourceRows] <> CASE [p].[SourceTable]
+                WHEN 'MetricSnapshot' THEN
+                    (SELECT COUNT_BIG(*) FROM dbo.MetricSnapshot AS [s]
+                      WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                        AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'MetricTextSnapshot' THEN
+                    (SELECT COUNT_BIG(*) FROM dbo.MetricTextSnapshot AS [s]
+                      WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                        AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'CollectionRunHistory' THEN
+                    (SELECT COUNT_BIG(*) FROM dbo.CollectionRunHistory AS [s]
+                      WHERE [s].[StartedAt]>=CONVERT(datetime2(0),[p].[RollupDate])
+                        AND [s].[StartedAt]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'DatabaseCapacitySnapshot' THEN
+                    (SELECT COUNT_BIG(*) FROM dbo.DatabaseCapacitySnapshot AS [s]
+                      WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                        AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'VolumeCapacitySnapshot' THEN
+                    (SELECT COUNT_BIG(*) FROM dbo.VolumeCapacitySnapshot AS [s]
+                      WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                        AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+             END;
+
+        IF @RequireArchiveCoverage=1 AND EXISTS (SELECT 1 FROM #CoverageFailures)
+        BEGIN
+            SELECT TOP (100) [RollupDate],[SourceTable],[Reason]
+            FROM #CoverageFailures ORDER BY [RollupDate],[SourceTable];
+            THROW 50162,'Cleanup blocked: missing/stale archive coverage. Backfill and validate first.',1;
+        END;
+
+        /* Dry-run reports candidate deletion counts; no rows deleted. */
     IF @DryRun = 1
     BEGIN
         SELECT
@@ -133,6 +232,7 @@ BEGIN
         FROM dbo.VolumeCapacitySnapshot
         WHERE [CaptureTime] < @VolumeCapacityCutoff;
 
+        EXEC sys.sp_releaseapplock @Resource=N'SQLSentinelArchiveDaily',@LockOwner='Session';
         RETURN;
     END;
 
@@ -202,6 +302,12 @@ BEGIN
         SET @RowsDeleted = @@ROWCOUNT;
         IF @RowsDeleted > 0 WAITFOR DELAY '00:00:00.200';
     END;
+    EXEC sys.sp_releaseapplock @Resource=N'SQLSentinelArchiveDaily',@LockOwner='Session';
+    END TRY
+    BEGIN CATCH
+        EXEC sys.sp_releaseapplock @Resource=N'SQLSentinelArchiveDaily',@LockOwner='Session';
+        THROW;
+    END CATCH;
 END;
 GO
 
