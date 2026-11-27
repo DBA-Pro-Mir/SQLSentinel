@@ -72,10 +72,15 @@ BEGIN
         [SourceTable] varchar(40) NOT NULL,
         [SourceRows] bigint NOT NULL,
         [SummaryRows] bigint NOT NULL,
+        [MaxSourceId] bigint NOT NULL,
         [CompletedAt] datetime2(0) NOT NULL,
         CONSTRAINT [PK_SQLSentinelRollupAudit] PRIMARY KEY CLUSTERED ([RollupDate],[SourceTable])
     );
 END;
+GO
+IF COL_LENGTH(N'dbo.SQLSentinelRollupAudit',N'MaxSourceId') IS NULL
+    ALTER TABLE [dbo].[SQLSentinelRollupAudit]
+    ADD [MaxSourceId] bigint NOT NULL CONSTRAINT [DF_SQLSentinelRollupAudit_MaxSourceId] DEFAULT (0);
 GO
 
 /* Extend a future boundary when the calendar advances.
@@ -141,7 +146,7 @@ GO
 
 CREATE OR ALTER VIEW [rpt].[vw_SQLSentinelArchiveCoverage]
 AS
-SELECT [RollupDate],[SourceTable],[SourceRows],[SummaryRows],[CompletedAt]
+SELECT [RollupDate],[SourceTable],[SourceRows],[SummaryRows],[MaxSourceId],[CompletedAt]
 FROM [dbo].[SQLSentinelRollupAudit];
 GO
 
