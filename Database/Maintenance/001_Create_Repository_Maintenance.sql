@@ -166,6 +166,28 @@ BEGIN
                     (SELECT COUNT_BIG(*) FROM dbo.VolumeCapacitySnapshot AS [s]
                       WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
                         AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+             END
+           OR [a].[MaxSourceId] < CASE [p].[SourceTable]
+                WHEN 'MetricSnapshot' THEN
+                    (SELECT ISNULL(MAX([s].[MetricSnapshotId]),0) FROM dbo.MetricSnapshot AS [s]
+                     WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                       AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'MetricTextSnapshot' THEN
+                    (SELECT ISNULL(MAX([s].[MetricTextSnapshotId]),0) FROM dbo.MetricTextSnapshot AS [s]
+                     WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                       AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'CollectionRunHistory' THEN
+                    (SELECT ISNULL(MAX([s].[CollectionRunId]),0) FROM dbo.CollectionRunHistory AS [s]
+                     WHERE [s].[StartedAt]>=CONVERT(datetime2(0),[p].[RollupDate])
+                       AND [s].[StartedAt]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'DatabaseCapacitySnapshot' THEN
+                    (SELECT ISNULL(MAX([s].[DatabaseCapacitySnapshotId]),0) FROM dbo.DatabaseCapacitySnapshot AS [s]
+                     WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                       AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
+                WHEN 'VolumeCapacitySnapshot' THEN
+                    (SELECT ISNULL(MAX([s].[VolumeCapacitySnapshotId]),0) FROM dbo.VolumeCapacitySnapshot AS [s]
+                     WHERE [s].[CaptureTime]>=CONVERT(datetime2(0),[p].[RollupDate])
+                       AND [s].[CaptureTime]<DATEADD(DAY,1,CONVERT(datetime2(0),[p].[RollupDate])))
              END;
 
         IF @DryRun=0 AND EXISTS (SELECT 1 FROM #CoverageFailures)
